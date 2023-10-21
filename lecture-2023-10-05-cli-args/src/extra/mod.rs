@@ -1,5 +1,7 @@
+pub mod csv;
 pub mod palindrome;
 
+pub use csv::csv;
 pub use palindrome::palindromize;
 
 /// mixed_case produce a string with changing lowercase and uppercase letters per odd/even character

@@ -1,12 +1,17 @@
-use lecture_2023_10_05_cli_args::{run, help};
+use std::env;
+use lecture::{print_help, run};
+
 
 fn main() {
-    match run() {
-        Ok(s) => println!("{}", s),
-        Err(err) => {
-            help();
-            if !err.is_empty() {
-                eprintln!("ERROR: {}", err);
+    let args = env::args().skip(1).collect::<Vec<String>>();
+    let first_arg = args.get(0);
+    let options = args.iter().skip(1).map(String::as_str).collect::<Vec<&str>>();
+    match first_arg {
+        None => print_help(),
+        Some(command) => {
+            match run(command, options) {
+                Ok(text) => println!("{}", text),
+                Err(error_text) => eprintln!("{}", error_text)
             }
         },
     }
