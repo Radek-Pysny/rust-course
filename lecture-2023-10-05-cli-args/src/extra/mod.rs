@@ -1,11 +1,10 @@
 pub mod csv;
 pub mod palindrome;
 
-pub use csv::csv;
 pub use palindrome::palindromize;
 
-/// mixed_case produce a string with changing lowercase and uppercase letters per odd/even character
-/// position. One can select whether the first character should be lowercase or uppercase.
+/// `mixed_case` produce a string with changing lowercase and uppercase letters per odd/even
+/// character position. One can select whether the first character should be lowercase or uppercase.
 pub fn mixed_case(text: &str, first_lowercase: bool) -> String {
     let uppercase_class = if first_lowercase { 1 } else { 0 };
     text.chars().enumerate().map(
@@ -17,7 +16,7 @@ pub fn mixed_case(text: &str, first_lowercase: bool) -> String {
     ).collect::<String>()
 }
 
-/// swap_pairs produce string with swapped characters per each pair.
+/// `swap_pairs` produce string with swapped characters per each pair.
 pub fn swap_pairs(text: &str) -> String {
     text.chars().collect::<Vec<_>>().chunks(2).map(
         |cs| if cs.len() == 2 {
@@ -33,10 +32,8 @@ pub fn no_spaces(text: &str) -> String {
     text.chars().filter(|char| !char.is_whitespace()).collect::<String>()
 }
 
-/// caesar is implementing Caesar's cipher.
-pub fn caesar(text: &str) -> String {
-    const SHIFT: u32 = 3;
-
+/// `caesar` is implementing Caesar's cipher by the given shift size.
+pub fn caesar(text: &str, shift: u32) -> String {
     text.chars().map(|char| {
         if char.is_ascii_alphabetic() {
             let ord_a;
@@ -48,7 +45,7 @@ pub fn caesar(text: &str) -> String {
                 ord_a = 'A' as u32;
                 ord_z = 'Z' as u32;
             }
-            let ord = (char as u32 - ord_a + SHIFT) % (ord_z - ord_a + 1) + ord_a;
+            let ord = (char as u32 - ord_a + shift) % (ord_z - ord_a + 1) + ord_a;
             if let Some(result) = char::from_u32(ord) {
                 result
             } else {
