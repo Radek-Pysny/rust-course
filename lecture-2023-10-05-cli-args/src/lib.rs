@@ -28,8 +28,12 @@ pub fn run(command: &str, options: Vec<&str>) -> Result {
 /// `run_interactive` is an entry point for interactive mode of this program.
 /// It spins up two threads (one for processing of input and one for text processing itself).
 pub fn run_interactive() -> std::result::Result<(), Box<dyn Error>> {
+    const ERROR_PREFIX: &str = "ERROR: ";
+
     let (tx, rx) = channel::<(Action, String)>();
 
+    // Input thread takes care of reading from stdio, parsing `Action` and sending it together with
+    // the rest text on the line over the channel to the processing thread.
     let input_thread_handle = thread::spawn(move || {
         let mut text: String = String::new();
         loop {
@@ -50,7 +54,7 @@ pub fn run_interactive() -> std::result::Result<(), Box<dyn Error>> {
                 .collect::<Vec<String>>();
 
             if parts.len() != 2 {
-                eprintln!("missing action specification");
+                eprintln!("{ERROR_PREFIX}missing action specification");
                 continue
             }
 
@@ -59,16 +63,18 @@ pub fn run_interactive() -> std::result::Result<(), Box<dyn Error>> {
 
             match Action::from_str(&action_text) {
                 Ok(action) => tx.send((action, input_text)).unwrap(),
-                Err(err) => eprintln!("{}", err),
+                Err(err) => eprintln!("{ERROR_PREFIX}{err}"),
             }
         }
     });
 
+    // Processing thread awaits a tuples (with action and text to be processed) from the input
+    // channel, process the input text and prints output to the stdout.
     let processing_thread_handle = thread::spawn(move || {
         while let Ok((action, text)) = rx.recv() {
             match action.act(&text) {
                 Ok(result) => println!("{}", result),
-                Err(err) => eprintln!("{}", err),
+                Err(err) => eprintln!("{ERROR_PREFIX}{err}"),
             }
 
         }
@@ -76,6 +82,7 @@ pub fn run_interactive() -> std::result::Result<(), Box<dyn Error>> {
         Ok::<(), String>(())
     });
 
+    // Trial to do there some reasonable clean up after the threads has finished their work.
     join_thread(input_thread_handle, "input thread")?;
     join_thread(processing_thread_handle, "processing thread")
 }

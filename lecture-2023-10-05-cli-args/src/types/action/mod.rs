@@ -96,7 +96,7 @@ impl Action {
             Action::MixedCase {first_lowercase} => mixed_case( text, *first_lowercase),
             Action::SwapPairs => swap_pairs(text),
             Action::Caesar => caesar(text, DEFAULT_CAESAR_SHIFT),
-            Action::Csv => todo!("Not yet implemented"),
+            Action::Csv => csv(text),
         }
     }
 }

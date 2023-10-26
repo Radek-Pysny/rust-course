@@ -1,10 +1,16 @@
+//! Contains simple functions that are accepting just the given input text and returning output
+//! of text-filter application.
+//!
+//! Exception is `csv` text filter which awaits filepath of valid CSV file (really comma-separated)
+//! to be processed as an input text (instead of filepath itself).
+
 pub mod single_shot;
 
 use slug;
 use std::error::Error;
 
 use crate::extra;
-use crate::extra::csv::_csv;
+use crate::extra::csv::{csv_from_stdin, csv_from_filepath};
 
 pub use single_shot::DEFAULT_CAESAR_SHIFT;
 
@@ -42,6 +48,6 @@ pub fn caesar(text: &str, shift: u32) -> std::result::Result<String, Box<dyn Err
     Ok(extra::caesar(&text, shift))
 }
 
-pub fn csv() -> std::result::Result<String, Box<dyn Error>> {
-    _csv()
+pub fn csv(filepath: &str) -> std::result::Result<String, Box<dyn Error>> {
+    csv_from_filepath(filepath)
 }

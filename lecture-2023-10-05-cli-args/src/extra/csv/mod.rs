@@ -1,15 +1,18 @@
-//! This module publishes function `_csv` that reads a csv from stdin and then it prints a table on
-//! stdout.
+//! This module publishes function `csv_from_stdin` that reads a csv from stdin and then it prints
+//! a table on stdout, but also `csv_from_filepath` reading a content of csv given by the filepath
+//! (still printing it on stdout).
 //!
 //! It is using standard csv crate, that takes care of troubles with different field count.
 //!
-//! Input:
+//! ## Example of `csv_from_stdin`
+//!
+//! ### Input:
 //!
 //! > a,bcd,e
 //! > 1,23,456
 //! > 69,,
 //!
-//! Output:
+//! ### Output:
 //!
 //! > |a |bcd|e  |
 //! > ------------
@@ -21,6 +24,7 @@ use std::error::Error;
 use std::io;
 use std::fmt;
 use std::fmt::Formatter;
+use std::fs::read_to_string;
 use csv;
 
 
@@ -42,8 +46,8 @@ struct Csv {
 
 impl Csv {
     /// from_csv_reader construct Csv struct by parsing the CSV content via the given CSV reader
-    fn from_csv_reader(
-        reader: &mut csv::Reader<io::Stdin>,
+    fn from_csv_reader<T: std::io::Read>(
+        reader: &mut csv::Reader<T>,
     ) -> std::result::Result<Self, Box<dyn Error>> {
         let mut result = Csv{
             header: Vec::new(),
@@ -74,6 +78,7 @@ impl Csv {
 impl fmt::Display for Csv {
     /// Thanks to implementation of Display trait, .to_string() is can be used.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // printing header line
         write!(f, "|")?;
         for (index, field) in self.header.iter().enumerate() {
             let mut output = field.to_string();
@@ -82,9 +87,11 @@ impl fmt::Display for Csv {
         }
         write!(f, "\n")?;
 
+        // printing a horizontal line as a separator between header line a content lines
         write!(f, "{}\n", "-".repeat(self.widths.iter().sum::<usize>() + self.header.len() + 1))?;
 
         for line in &self.lines {
+            // printing each content line
             write!(f, "|")?;
             for (index, field) in line.iter().enumerate() {
                 let mut output = field.to_string();
@@ -97,9 +104,16 @@ impl fmt::Display for Csv {
     }
 }
 
-
-pub fn _csv() -> Result<String, Box<dyn Error>> {
+/// `csv_from_stdin` continuously reads lines from stdin and process them until Ctrl+D occurs.
+pub fn csv_from_stdin() -> Result<String, Box<dyn Error>> {
     let mut csv_reader = csv::Reader::from_reader(io::stdin());
+    let content = Csv::from_csv_reader(&mut csv_reader)?;
+    Ok(content.to_string())
+}
+
+/// `csv_from_filepath` read and process the content of the given file.
+pub fn csv_from_filepath(filepath: &str) -> Result<String, Box<dyn Error>> {
+    let mut csv_reader = csv::Reader::from_path(filepath)?;
     let content = Csv::from_csv_reader(&mut csv_reader)?;
     Ok(content.to_string())
 }

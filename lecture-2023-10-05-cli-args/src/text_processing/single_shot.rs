@@ -1,3 +1,11 @@
+//! Contains functions (each per supported text filter) that take the rest of the given CLI options,
+//! reads their expected input from a stdin (commonly just a single line) and returns the output
+//! of filter application on the given input text.
+//!
+//! Each of text-filtering functions does not expect any additional option and fail if any
+//! unexpected options are passed to them. Example of processing optional CLI option is `caesar`
+//! (accepting shift size fo Caesar's cipher).
+
 use std::error::Error;
 
 /// `get_stdin_line` read single line from stdin.
@@ -66,7 +74,7 @@ pub fn swap_pairs(options: Vec<&str>) -> Result {
 pub const DEFAULT_CAESAR_SHIFT: u32 = 3;
 
 /// `caesar` convert the line read from stdin using Caesar cipher with optional shift size.
-/// If size is not specifies, default size is 3.
+/// If size is not specifies, default size is 3 (see `DEFAULT_CAESAR_SHIFT` for truth).
 /// One can take implementation of this method as example of working with optional cli options.
 pub fn caesar(options: Vec<&str>) -> Result {
     let shift = if options.is_empty() {
@@ -85,5 +93,5 @@ pub fn caesar(options: Vec<&str>) -> Result {
 
 pub fn csv(options: Vec<&str>) -> Result {
     check_empty_options(options)?;
-    super::_csv()
+    super::csv_from_stdin()
 }
