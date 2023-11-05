@@ -1,7 +1,7 @@
 use std::fmt::{self, Formatter};
 use std::str::FromStr;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 
 
 #[derive(PartialEq, Eq)]
@@ -13,7 +13,9 @@ pub enum MessageType {
 }
 
 
-/// `Action` represent all the available actions over the given input string.
+/// `Command` represent all the available commands over known by the client.
+/// For better developer experience is included empty command, so empty lines might be simply
+/// ignored.
 #[derive(PartialEq, Eq)]
 pub enum Command {
     Empty,
@@ -25,7 +27,7 @@ pub enum Command {
 
 
 impl fmt::Display for Command {
-    /// `fmt` enable conversion from `Action` to `&str` via `to_string` method.
+    /// `fmt` enable conversion from `Comment` to `&str` via `to_string` method.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let key = match self {
             Command::Empty => "",
@@ -88,13 +90,39 @@ impl FromStr for Command {
             Err(err) => return Err(err.to_string()),
         };
 
+        if let Command::Image{content, ..} = &mut command {
+            check_image(content)?;
+        }
+
         return Ok(command)
     }
 }
 
 
+/// `check_image` implement transparent conversion of any possible (tested just with jpeg format)
+/// image file format into the PNG file format.
+fn check_image(content: &mut Vec<u8>) -> Result<(), String> {
+    use image::io::Reader;
+
+    let reader = match Reader::new(Cursor::new(&content))
+        .with_guessed_format()
+        .expect("Cursor I/O never fails")
+        .decode() {
+        Ok(reader) => reader,
+        Err(err) => Err(format!("failed to decode image format: {}", err.to_string()))?,
+    };
+
+    match reader.write_to(&mut Cursor::new(content), image::ImageOutputFormat::Png) {
+        Ok(_) => {},
+        Err(err) => Err(format!("failed to convert image into PNG format: {}", err.to_string()))?,
+    }
+
+    Ok(())
+}
+
+
 impl Command {
-    /// `single_shot_act` start to process input from stdin with the given options.
+    /// `extract` is used for extraction of data of command into 3-tuple to be passed via channel.
     pub fn extract(self) -> (MessageType, Option<String>, Option<Vec<u8>>) {
         match self {
             Command::Text {text} =>
