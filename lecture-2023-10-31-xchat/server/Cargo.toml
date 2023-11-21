@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 argparse = "0.2.2"
+rayon = "1.8.0"
 shared = { path = "../shared" }
+tokio = "1.33.0"
