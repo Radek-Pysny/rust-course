@@ -9,4 +9,5 @@ edition = "2021"
 argparse = "0.2.2"
 rayon = "1.8.0"
 shared = { path = "../shared" }
+thiserror = "1.0.50"
 tokio = "1.33.0"
