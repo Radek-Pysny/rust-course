@@ -13,7 +13,7 @@ use std::time;
 use color_eyre::eyre;
 #[cfg(not(debug_assertions))]
 use ::anyhow as eyre;
-use eyre::{bail, Result, Context};
+use eyre::{anyhow, bail, Result, Context};
 
 use commands::{Command, MessageType};
 use shared::{Message, panic_to_text};
@@ -60,7 +60,7 @@ pub fn run_interactive(address: &str) -> Result<()> {
 
             let count = std::io::stdin().read_line(&mut text);
             if count.is_err() {
-                return Err(count.err().unwrap().to_string());
+                bail!("failed to read from stdin: {}", count.err().unwrap().to_string());
             }
             if let Ok(0) = count { // no \n character -> finished by Ctrl+D
                 return Ok(());
@@ -156,8 +156,9 @@ pub fn run_interactive(address: &str) -> Result<()> {
 
                 // write error message for any error that could possibly occur
                 Err(err) => {
-                    tx_print.send((OutputType::ErrorOutput, err.to_string())).unwrap();
-                    return Err(err.to_string());
+                    let error_message = err.to_string();
+                    tx_print.send((OutputType::ErrorOutput, error_message.clone())).unwrap();
+                    bail!("failed to receive a message from the server: {}", error_message);
                 }
             }
 
@@ -167,7 +168,7 @@ pub fn run_interactive(address: &str) -> Result<()> {
             }
         }
 
-        Ok::<(), String>(())
+        Ok(())
     });
 
     // Printing thread takes care of any prints to stdout or stderr.
@@ -202,13 +203,15 @@ pub fn run_interactive(address: &str) -> Result<()> {
 
 /// `join_thread` is just a helper function converting possible errors from thread panicking.
 fn join_thread<T>(handle: JoinHandle<T>) -> Result<()> {
-    if let Err(err) = handle.join() {
-        bail!("thread panicked: {}", panic_to_text(err))
-    };
-    Ok(())
+    match handle.join() {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!("thread panicked: {}", panic_to_text(err))),
+    }
 }
 
 
+/// `save_image` save image as <timestamp>.png file under `images/` subdirectory. It expects, that
+/// conversion of any image format was done by the client that sent image.
 fn save_image(payload: Vec<u8>) -> Result<()> {
     use chrono::offset::Local;
     use chrono::DateTime;
@@ -226,6 +229,7 @@ fn save_image(payload: Vec<u8>) -> Result<()> {
 }
 
 
+/// `save_file` save general file into `files/` subdirectory.
 fn save_file(filename: &String, payload: Vec<u8>) -> Result<()> {
     let filepath_str = format!("./files/{}", filename);
     let filepath = Path::new(filepath_str.as_str());
@@ -236,6 +240,7 @@ fn save_file(filename: &String, payload: Vec<u8>) -> Result<()> {
 }
 
 
+/// `_save_file` is just a helper function that saved what is needed in the given filepath.
 fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     // create needed directories on path to the target file (if needed)
     if let Err(err) = create_dir_all(filepath.parent().unwrap()) {
@@ -251,6 +256,6 @@ fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     // write all the binary data into an empty file open for writing
     match f.write_all(&content) {
         Ok(_) => Ok(()),
-        Err(err) => bail!("failed to write into file: {}", err.to_string()),
+        Err(err) => Err(anyhow!("failed to write into file: {}", err.to_string())),
     }
 }
