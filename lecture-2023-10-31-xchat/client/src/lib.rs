@@ -9,8 +9,14 @@ use std::sync::mpsc::{channel, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time;
 
+#[cfg(debug_assertions)]
+use color_eyre::eyre;
+#[cfg(not(debug_assertions))]
+use ::anyhow as eyre;
+use eyre::{anyhow, Result, Context};
+
 use commands::{Command, MessageType};
-use shared::Message;
+use shared::{Message, panic_to_text};
 
 
 #[repr(u8)]
@@ -22,7 +28,10 @@ enum OutputType {
 
 /// `run_interactive` is an entry point for interactive mode of this program.
 /// It spins up two threads (one for processing of input and one for text processing itself).
-pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn run_interactive(address: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    color_eyre::install()?;
+
     const ERROR_PREFIX: &str = "ERROR: ";
 
     let mut stream = match TcpStream::connect(address) {
@@ -174,9 +183,9 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
     });
 
     // Trial to do there some reasonable clean up after the threads has finished their work.
-    join_thread(input_thread_handle, "input thread")?;
-    join_thread(processing_thread_handle, "processing thread")?;
-    join_thread(printing_thread_handle, "printing thread")
+    join_thread(input_thread_handle).context("input thread")?;
+    join_thread(processing_thread_handle).context("processing thread")?;
+    join_thread(printing_thread_handle).context("printing thread")
 }
 
 
@@ -192,22 +201,16 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
 
 
 /// `join_thread` is just a helper function converting possible errors from thread panicking.
-fn join_thread<T>(
-    handle: JoinHandle<T>,
-    thread_name: &str,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    if let Err(err) = handle.join() {
-        let error_message = match err.downcast_ref::<&str>() {
-            Some(err) => *err,
-            None => "unknown error",
-        };
-        Err(format!("{} panicked: {}", thread_name, error_message))?;
+fn join_thread<T: Display>(handle: JoinHandle<T>) -> Result<()> {
+    match handle.join() {
+        Ok(ok) => {},
+        Err(err) => anyhow!("thread panicked: {}", panic_to_text(err)),
     };
     Ok(())
 }
 
 
-fn save_image(payload: Vec<u8>) -> Result<(), String> {
+fn save_image(payload: Vec<u8>) -> Result<()> {
     use chrono::offset::Local;
     use chrono::DateTime;
     use std::time::SystemTime;
@@ -215,36 +218,40 @@ fn save_image(payload: Vec<u8>) -> Result<(), String> {
     let now: DateTime<Local> = SystemTime::now().into();
     let timestamp = now.format("%Y-%m-%dT%H:%I");
 
-    let filepath = format!("./images/{}.png", timestamp);
-    let filepath = Path::new(filepath.as_str());
+    let filepath_str = format!("./images/{}.png", timestamp);
+    let filepath = Path::new(filepath_str.as_str());
 
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).with_context(||
+        format!("saving image: {}", filepath_str)
+    )
 }
 
 
-fn save_file(filename: &String, payload: Vec<u8>) -> Result<(), String> {
-    let filepath = format!("./files/{}", filename);
-    let filepath = Path::new(filepath.as_str());
+fn save_file(filename: &String, payload: Vec<u8>) -> Result<()> {
+    let filepath_str = format!("./files/{}", filename);
+    let filepath = Path::new(filepath_str.as_str());
 
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).with_context(||
+        format!("saving file: {}", filepath_str)
+    )
 }
 
 
-fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<(), String> {
+fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     // create needed directories on path to the target file (if needed)
     if let Err(err) = create_dir_all(filepath.parent().unwrap()) {
-        Err(err.to_string())?;
+        anyhow!("failed to prepare directories: {}", err.to_string());
     }
 
     // create a new file (possibly truncating any already existing)
     let mut f = match File::create(&filepath) {
         Ok(file) => file,
-        Err(err) => Err(err.to_string())?,
+        Err(err) => anyhow!("failed to create file: {}", err.to_string()),
     };
 
     // write all the binary data into an empty file open for writing
     match f.write_all(&content) {
         Ok(_) => Ok(()),
-        Err(err) => Err(err.to_string()),
+        Err(err) => anyhow!("failed to write into file: {}", err.to_string()),
     }
 }
