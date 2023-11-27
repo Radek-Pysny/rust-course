@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 argparse = "0.2.2"
 chrono = "0.4.31"
+color-eyre = "0.6.2"
 image = "0.24.7"
 shared = { path = "../shared" }
