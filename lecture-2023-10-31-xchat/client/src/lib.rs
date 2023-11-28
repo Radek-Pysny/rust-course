@@ -9,8 +9,14 @@ use std::sync::mpsc::{channel, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time;
 
+#[cfg(debug_assertions)]
+use color_eyre::eyre;
+#[cfg(not(debug_assertions))]
+use ::anyhow as eyre;
+use eyre::{anyhow, bail, Result, Context};
+
 use commands::{Command, MessageType};
-use shared::Message;
+use shared::{Message, panic_to_text};
 
 
 #[repr(u8)]
@@ -22,15 +28,18 @@ enum OutputType {
 
 /// `run_interactive` is an entry point for interactive mode of this program.
 /// It spins up two threads (one for processing of input and one for text processing itself).
-pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn run_interactive(address: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    color_eyre::install()?;
+
     const ERROR_PREFIX: &str = "ERROR: ";
 
     let mut stream = match TcpStream::connect(address) {
         Ok(stream) => stream,
-        Err(err) => Err(format!("failed to connect: {}", err.to_string()))?,
+        Err(err) => bail!("failed to connect: {}", err.to_string()),
     };
     if let Err(err) = stream.set_nonblocking(true) {
-        Err(format!("failed to set stream attribute: {}", err.to_string()))?;
+        bail!("failed to set stream attribute: {}", err.to_string());
     }
 
     // Channel for sending of commands from input thread to processing thread.
@@ -51,7 +60,7 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
 
             let count = std::io::stdin().read_line(&mut text);
             if count.is_err() {
-                return Err(count.err().unwrap().to_string());
+                bail!("failed to read from stdin: {}", count.err().unwrap().to_string());
             }
             if let Ok(0) = count { // no \n character -> finished by Ctrl+D
                 return Ok(());
@@ -147,8 +156,9 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
 
                 // write error message for any error that could possibly occur
                 Err(err) => {
-                    tx_print.send((OutputType::ErrorOutput, err.to_string())).unwrap();
-                    return Err(err.to_string());
+                    let error_message = err.to_string();
+                    tx_print.send((OutputType::ErrorOutput, error_message.clone())).unwrap();
+                    bail!("failed to receive a message from the server: {}", error_message);
                 }
             }
 
@@ -158,7 +168,7 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
             }
         }
 
-        Ok::<(), String>(())
+        Ok(())
     });
 
     // Printing thread takes care of any prints to stdout or stderr.
@@ -174,9 +184,9 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
     });
 
     // Trial to do there some reasonable clean up after the threads has finished their work.
-    join_thread(input_thread_handle, "input thread")?;
-    join_thread(processing_thread_handle, "processing thread")?;
-    join_thread(printing_thread_handle, "printing thread")
+    join_thread(input_thread_handle).context("input thread")?;
+    join_thread(processing_thread_handle).context("processing thread")?;
+    join_thread(printing_thread_handle).context("printing thread")
 }
 
 
@@ -192,59 +202,60 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
 
 
 /// `join_thread` is just a helper function converting possible errors from thread panicking.
-fn join_thread<T>(
-    handle: JoinHandle<T>,
-    thread_name: &str,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    if let Err(err) = handle.join() {
-        let error_message = match err.downcast_ref::<&str>() {
-            Some(err) => *err,
-            None => "unknown error",
-        };
-        Err(format!("{} panicked: {}", thread_name, error_message))?;
-    };
-    Ok(())
+fn join_thread<T>(handle: JoinHandle<T>) -> Result<()> {
+    match handle.join() {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!("thread panicked: {}", panic_to_text(err))),
+    }
 }
 
 
-fn save_image(payload: Vec<u8>) -> Result<(), String> {
+/// `save_image` save image as <timestamp>.png file under `images/` subdirectory. It expects, that
+/// conversion of any image format was done by the client that sent image.
+fn save_image(payload: Vec<u8>) -> Result<()> {
     use chrono::offset::Local;
     use chrono::DateTime;
     use std::time::SystemTime;
 
     let now: DateTime<Local> = SystemTime::now().into();
-    let timestamp = now.format("%Y-%m-%dT%H:%I");
+    let timestamp = now.format("%Y-%m-%dT%H:%M:%S");
 
-    let filepath = format!("./images/{}.png", timestamp);
-    let filepath = Path::new(filepath.as_str());
+    let filepath_str = format!("./images/{}.png", timestamp);
+    let filepath = Path::new(filepath_str.as_str());
 
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).with_context(||
+        format!("saving image: {}", filepath_str)
+    )
 }
 
 
-fn save_file(filename: &String, payload: Vec<u8>) -> Result<(), String> {
-    let filepath = format!("./files/{}", filename);
-    let filepath = Path::new(filepath.as_str());
+/// `save_file` save general file into `files/` subdirectory.
+fn save_file(filename: &String, payload: Vec<u8>) -> Result<()> {
+    let filepath_str = format!("./files/{}", filename);
+    let filepath = Path::new(filepath_str.as_str());
 
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).with_context(||
+        format!("saving file: {}", filepath_str)
+    )
 }
 
 
-fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<(), String> {
+/// `_save_file` is just a helper function that saved what is needed in the given filepath.
+fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     // create needed directories on path to the target file (if needed)
     if let Err(err) = create_dir_all(filepath.parent().unwrap()) {
-        Err(err.to_string())?;
+        bail!("failed to prepare directories: {}", err.to_string());
     }
 
     // create a new file (possibly truncating any already existing)
     let mut f = match File::create(&filepath) {
         Ok(file) => file,
-        Err(err) => Err(err.to_string())?,
+        Err(err) => bail!("failed to create file: {}", err.to_string()),
     };
 
     // write all the binary data into an empty file open for writing
     match f.write_all(&content) {
         Ok(_) => Ok(()),
-        Err(err) => Err(err.to_string()),
+        Err(err) => Err(anyhow!("failed to write into file: {}", err.to_string())),
     }
 }
