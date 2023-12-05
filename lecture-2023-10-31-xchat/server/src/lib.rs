@@ -1,19 +1,22 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, atomic};
+use std::net::{SocketAddr};
+use std::sync::{Arc, atomic};
 use std::sync::atomic::Ordering::Relaxed;
-use std::thread::{spawn, sleep};
+use std::thread::{sleep};
 use std::time;
 
-use rayon::prelude::*;
+use tokio::sync::Mutex;
+use tokio::net::{TcpListener, TcpStream};
 use thiserror::Error;
 
-use shared::{Message, panic_to_text};
+use shared::{Message};
 
 
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("failed port binding: {0}")]
+    PortBindError(String),
     #[error("failed to establish client connection: {0}")]
     ClientConnectionError(String),
     #[error("failed to get peer address after client connection: {0}")]
@@ -35,7 +38,7 @@ type Clients = Arc<Mutex<ClientMap>>;
 
 /// `start_server` is entrypoint of server. It starts main processing loop in a separate thread
 /// while main thread keep8s track on managing new client connections.
-pub fn start_server(address: &str) -> Result<(), ServerError> {
+pub async fn start_server(address: &str) -> Result<(), ServerError> {
     let client_map: ClientMap = HashMap::new();
     let clients: Clients = Arc::new(Mutex::new(client_map));
 
@@ -43,44 +46,44 @@ pub fn start_server(address: &str) -> Result<(), ServerError> {
 
     let thread_clients = clients.clone();
     let thread_ok = finish_flag.clone();
-    let mut chat_handle = Some(spawn(||
-        chat(thread_clients, thread_ok)
-    ));
+    let mut chat_task = Some(tokio::spawn(async move {
+        chat(thread_clients, thread_ok).await
+    }));
 
 
     let thread_address = address.to_string();
     let thread_clients = clients.clone();
     let thread_finish_flag = finish_flag.clone();
-    let mut server_handle = Some(spawn(move ||
-        listen_and_accept(thread_address, thread_clients, thread_finish_flag)
-    ));
+    let mut server_task = Some(tokio::spawn(async move {
+        listen_and_accept(thread_address, thread_clients, thread_finish_flag).await
+    }));
 
     let res: Result<(), ServerError> = Ok(());
     loop {
-        if chat_handle.is_none() && server_handle.is_none() {
+        if chat_task.is_none() && server_task.is_none() {
             break
         }
 
-        if let Some(handle) = chat_handle.as_ref() {
+        if let Some(handle) = chat_task.as_ref() {
             if handle.is_finished() {
-                match chat_handle.take().unwrap().join() {
-                    Ok(Ok(_)) => {},
-                    Ok(Err(err)) => eprintln!("CHAT THREAD ERROR: {}", err),
+                match tokio::try_join!(chat_task.take().unwrap()) {
+                    Ok((Ok(_),)) => {},
+                    Ok((Err(err),)) => eprintln!("CHAT THREAD ERROR: {}", err),
                     Err(err) => {
-                        eprintln!("CHAT THREAD PANIC: {}", panic_to_text(err))
+                        eprintln!("CHAT THREAD PANIC: {}", err.to_string())
                     },
                 };
                 finish_flag.store(true, Relaxed);
             }
         }
 
-        if let Some(handle) = server_handle.as_ref() {
+        if let Some(handle) = server_task.as_ref() {
             if handle.is_finished() {
-                match server_handle.take().unwrap().join() {
-                    Ok(Ok(_)) => {},
-                    Ok(Err(err)) => eprintln!("SERVER THREAD ERROR: {}", err),
+                match tokio::try_join!(server_task.take().unwrap()) {
+                    Ok((Ok(_),)) => {},
+                    Ok((Err(err),)) => eprintln!("SERVER THREAD ERROR: {}", err),
                     Err(err) => {
-                        eprintln!("SERVER THREAD PANIC: {}", panic_to_text(err));
+                        eprintln!("SERVER THREAD PANIC: {}", err.to_string());
                     }
                 }
                 finish_flag.store(true, Relaxed);
@@ -93,14 +96,22 @@ pub fn start_server(address: &str) -> Result<(), ServerError> {
 
 
 /// `listen_and_accept` take care of connection of new client connections.
-fn listen_and_accept(
+async fn listen_and_accept(
     address: String,
     clients: Clients,
     finish_flag: Arc<atomic::AtomicBool>,
 ) -> Result<(), ServerError> {
-    let listener = TcpListener::bind(address)?;
+    let listener = match TcpListener::bind(address).await {
+        Ok(listener) => listener,
+        Err(err) => Err(ServerError::PortBindError(err.to_string()))?,
+    };
 
-    for stream in listener.incoming() {
+    loop {
+        let (stream, address) = match listener.accept().await {
+            Ok((stream, address)) => (stream, address),
+            Err(err) => Err(ServerError::ClientConnectionError(err.to_string()))?,
+        };
+
         // Detection of error from the other thread.
         // TODO: incomming is blocking, so we would detect it currently only on any new client conn.
         if finish_flag.load(Relaxed) {
@@ -108,32 +119,29 @@ fn listen_and_accept(
             break
         }
 
-        let stream = match stream {
-            Ok(stream) => stream,
-            Err(err) => Err(ServerError::ClientConnectionError(err.to_string()))?,
-        };
-
-        let address = match stream.peer_addr() {
-            Ok(addr) => addr,
-            Err(err) => Err(ServerError::ClientPeerAddressError(err.to_string()))?,
-        };
+        // let stream = match stream {
+        //     Ok(stream) => stream,
+        //     Err(err) => Err(ServerError::ClientConnectionError(err.to_string()))?,
+        // };
+        //
+        // let address = match stream.peer_addr() {
+        //     Ok(addr) => addr,
+        //     Err(err) => Err(ServerError::ClientPeerAddressError(err.to_string()))?,
+        // };
 
         // if let Err(err) = stream.set_nonblocking(true) {
         //     ServerError::ClientStreamConfigError(err.to_string())?;
         // }
-        if let Err(err) = stream.set_read_timeout(Some(time::Duration::from_nanos(10))) {
-            Err(ServerError::ClientStreamConfigError(err.to_string()))?;
-        }
 
-        if let Err(err) = stream.set_write_timeout(Some(time::Duration::from_nanos(10))) {
-            Err(ServerError::ClientStreamConfigError(err.to_string()))?;
-        }
+        // if let Err(err) = stream.set_read_timeout(Some(time::Duration::from_nanos(10))) {
+        //     Err(ServerError::ClientStreamConfigError(err.to_string()))?;
+        // }
+        //
+        // if let Err(err) = stream.set_write_timeout(Some(time::Duration::from_nanos(10))) {
+        //     Err(ServerError::ClientStreamConfigError(err.to_string()))?;
+        // }
 
-        let mut clients = match clients.lock() {
-            Ok(clients) => clients,
-            Err(_poisoned) => Err(ServerError::SharedMutexPoisonedError)?,
-        };
-        clients.insert(address, stream);
+        clients.lock().await.insert(address, stream);
     }
 
     Ok(())
@@ -144,7 +152,7 @@ fn listen_and_accept(
 ///   1. try to receive a message from each of connected clients
 ///   2. broadcast each received message to each other connected client
 ///   3. removal of disconnected clients from the internal map
-fn chat(
+async fn chat(
     clients: Clients,
     finish_flag: Arc<atomic::AtomicBool>,
 )  -> Result<(), ServerError> {
@@ -162,11 +170,11 @@ fn chat(
         close_queue.clear();
 
         {
-            let mut client_map = clients.lock().unwrap();
+            let mut client_map = clients.lock().await;
 
             // Receiving messages from clients and storing them into `message_queue`.
             for (address, stream) in client_map.iter_mut() {
-                let message = Message::receive(stream);
+                let message = Message::receive(stream).await;
                 match message {
                     Ok(Some(message)) =>
                         message_queue.push((address.clone(), message)),
@@ -191,20 +199,24 @@ fn chat(
 
         // Broadcasting messages stored in `message_queue`.
         if !message_queue.is_empty() {
-            message_queue.par_iter().for_each(|(address, message)| {
-                let result = send_to_everyone_else(&clients, address, message);
-                if let Err(err) = result {
-                    eprintln!("{}", err.to_string())
+            for (address, message) in message_queue.iter_mut() {
+                match send_to_everyone_else(&clients, address, message).await {
+                    Ok(_) => {},
+                    Err(err) => eprintln!("sending failed: {}", err.to_string()),
                 }
-            });
+            }
         }
 
         // Removal of disconnected clients.
         if !close_queue.is_empty() {
-            close_queue.par_iter().for_each(|address| {
+            for address in close_queue.iter() {
                 println!("Disconnected client {}", address.to_string());
-                clients.lock().unwrap().remove(address);
-            });
+                clients.lock().await.remove(address);
+            }
+            // close_queue.par_iter().for_each(|address| {
+            //     println!("Disconnected client {}", address.to_string());
+            //     clients.lock().unwrap().remove(address);
+            // });
         }
 
         sleep(delay);
@@ -213,17 +225,17 @@ fn chat(
 
 
 /// `send_to_everyone_else` process sending of message to every client other to the message sender.
-fn send_to_everyone_else(
+async fn send_to_everyone_else(
     clients: &Clients,
     source_address: &SocketAddr,
     message: &Message,
 ) -> Result<(), ServerError> {
-    for (address, stream) in clients.lock().unwrap().iter_mut() {
+    for (address, stream) in clients.lock().await.iter_mut() {
         if address == source_address {
             continue
         }
 
-        if let Err(err) = message.send(stream) {
+        if let Err(err) = message.send(stream).await {
             Err(ServerError::ForwardMessageError{
                 address: address.to_string(),
                 detail: err.to_string(),
