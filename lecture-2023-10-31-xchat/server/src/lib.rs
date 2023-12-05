@@ -119,28 +119,6 @@ async fn listen_and_accept(
             break
         }
 
-        // let stream = match stream {
-        //     Ok(stream) => stream,
-        //     Err(err) => Err(ServerError::ClientConnectionError(err.to_string()))?,
-        // };
-        //
-        // let address = match stream.peer_addr() {
-        //     Ok(addr) => addr,
-        //     Err(err) => Err(ServerError::ClientPeerAddressError(err.to_string()))?,
-        // };
-
-        // if let Err(err) = stream.set_nonblocking(true) {
-        //     ServerError::ClientStreamConfigError(err.to_string())?;
-        // }
-
-        // if let Err(err) = stream.set_read_timeout(Some(time::Duration::from_nanos(10))) {
-        //     Err(ServerError::ClientStreamConfigError(err.to_string()))?;
-        // }
-        //
-        // if let Err(err) = stream.set_write_timeout(Some(time::Duration::from_nanos(10))) {
-        //     Err(ServerError::ClientStreamConfigError(err.to_string()))?;
-        // }
-
         clients.lock().await.insert(address, stream);
     }
 
