@@ -1,7 +1,8 @@
 use client::run_interactive;
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut hostname = "localhost".to_string();
     let mut port = 11111_u16;
 
@@ -9,7 +10,7 @@ fn main() {
 
     let address = format!("{}:{}", hostname, port);
 
-    if let Err(err) = run_interactive(&address) {
+    if let Err(err) = run_interactive(&address).await {
         eprintln!("{}", err.to_string());
     }
 }

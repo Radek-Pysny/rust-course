@@ -1,7 +1,8 @@
 use server::start_server;
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut hostname = "localhost".to_string();
     let mut port = 11111_u16;
 
@@ -9,7 +10,7 @@ fn main() {
 
     let address = format!("{}:{}", hostname, port);
 
-    if let Err(err) = start_server(&address) {
+    if let Err(err) = start_server(&address).await {
         eprintln!("{}", err);
     }
 }
