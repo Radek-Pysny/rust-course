@@ -3,7 +3,7 @@ mod commands;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, TryRecvError};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time;
 
 use tokio::net::TcpStream;
@@ -161,11 +161,6 @@ pub async fn run_interactive(address: &str) -> Result<()> {
                     tx_print.send((OutputType::ErrorOutput, error_message.clone())).unwrap();
                     bail!("failed to receive a message from the server: {}", error_message);
                 }
-            }
-
-            // Optional sleep that takes part in case of nothing being processed at this loop round.
-            if let (false, false) = processed {
-                thread::sleep(delay);
             }
         }
 

@@ -45,12 +45,13 @@ impl Message {
 
     pub async fn receive(stream: &mut TcpStream) -> Result<Option<Message>> {
         let mut length_bytes = [0u8; 4];
-        match stream.read_exact(&mut length_bytes).await {
+        match stream.try_read(&mut length_bytes) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
             Ok(_) => {},
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(None);
-            },
-            Err(error) => bail!(error),
+            }
+            Err(err) => bail!(err),
         }
         let length = u32::from_be_bytes(length_bytes) as usize;
 
