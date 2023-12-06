@@ -2,13 +2,11 @@ mod commands;
 
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::mpsc::{channel, TryRecvError};
-use std::thread;
-use std::time;
 
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt};
 use tokio::fs::{File, create_dir_all};
+use tokio::time::{sleep, Duration};
 
 #[cfg(debug_assertions)]
 use color_eyre::eyre;
@@ -28,7 +26,7 @@ enum OutputType {
 
 
 /// `run_interactive` is an entry point for interactive mode of this program.
-/// It spins up two threads (one for processing of input and one for text processing itself).
+/// It spins up three async tasks (input processing, server communication, and printing).
 pub async fn run_interactive(address: &str) -> Result<()> {
     #[cfg(debug_assertions)]
     color_eyre::install()?;
@@ -39,22 +37,19 @@ pub async fn run_interactive(address: &str) -> Result<()> {
         Ok(stream) => stream,
         Err(err) => bail!("failed to connect: {}", err.to_string()),
     };
-    // if let Err(err) = stream.set_nonblocking(true) {
-    //     bail!("failed to set stream attribute: {}", err.to_string());
-    // }
 
-    // Channel for sending of commands from input thread to processing thread.
+    // Channel for sending of commands from input task to processing task.
     let (tx_cmd, rx_cmd) =
-        channel::<(MessageType, Option<String>, Option<Vec<u8>>)>();
+        flume::unbounded::<(MessageType, Option<String>, Option<Vec<u8>>)>();
 
     // Channel for accepting of any messages to be print out on a stdout or stderr.
-    let (tx_print, rx_print) = channel::<(OutputType, String)>();
+    let (tx_print, rx_print) = flume::unbounded::<(OutputType, String)>();
 
-    // Input thread takes care of reading from stdio, parsing `Action` and sending it together with
-    // the rest text on the line over the channel to the processing thread.
-    let tx_print_for_input_thread = tx_print.clone();
+    // Input task takes care of reading from stdio, parsing `Action` and sending it together with
+    // the rest text on the line over the channel to the processing task.
+    let tx_print_for_input_task = tx_print.clone();
     let input_task = tokio::spawn(async move {
-        let tx_print = tx_print_for_input_thread;
+        let tx_print = tx_print_for_input_task;
         let mut text: String = String::new();
         loop {
             text.clear();
@@ -84,12 +79,12 @@ pub async fn run_interactive(address: &str) -> Result<()> {
         }
     });
 
-    // Processing thread awaits a tuples (with action and text to be processed) from the input
+    // Processing task awaits a tuples (with action and text to be processed) from the input
     // channel, process the input text and prints output to the stdout.
     let process_task = tokio::spawn(async move {
         let tx_print = tx_print;    // takes ownership
         let mut processed = (false, false);
-        let delay = time::Duration::from_millis(10);
+        let delay = Duration::from_millis(10);
 
         loop {
             // Processing command for sending a message to the server.
@@ -113,8 +108,8 @@ pub async fn run_interactive(address: &str) -> Result<()> {
                             unwrap(),
                     }
                 }
-                Err(TryRecvError::Empty) => processed.0 = false, // nothing to be send to server
-                Err(TryRecvError::Disconnected) => break,
+                Err(flume::TryRecvError::Empty) => processed.0 = false, // nothing to be send
+                Err(flume::TryRecvError::Disconnected) => break,
             }
 
             // Processing messages received from the server.
@@ -162,12 +157,17 @@ pub async fn run_interactive(address: &str) -> Result<()> {
                     bail!("failed to receive a message from the server: {}", error_message);
                 }
             }
+
+            // Optional sleep that takes part in case of nothing being processed at this loop round.
+            if let (false, false) = processed {
+                sleep(delay).await;
+            }
         }
 
         Ok(())
     });
 
-    // Printing thread takes care of any prints to stdout or stderr.
+    // Printing task takes care of any prints to stdout or stderr.
     let print_task = tokio::spawn(async move {
         while let Ok(request) = rx_print.recv() {
             match request {
@@ -179,10 +179,6 @@ pub async fn run_interactive(address: &str) -> Result<()> {
        Ok::<(), String>(())
     });
 
-    // Trial to do there some reasonable clean up after the threads has finished their work.
-    // join_thread(input_thread_handle).context("input thread")?;
-    // join_thread(processing_thread_handle).context("processing thread")?;
-    // join_thread(printing_thread_handle).context("printing thread")
     let _ = tokio::try_join!(input_task, process_task, print_task);
 
     Ok(())
