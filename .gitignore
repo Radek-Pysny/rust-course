@@ -1,4 +1,7 @@
 **/.idea/
 **/target/
 **/_example_data/
-
+**/.sqlx/
+**/server/*.db
+**/server/*.db-shm
+**/server/*.db-wal
