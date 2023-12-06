@@ -1,16 +1,20 @@
+mod db_queries;
+
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr};
 use std::sync::{Arc, atomic};
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread::{sleep};
-use std::time;
+use std::time::{self, SystemTime};
 
+use sqlx::sqlite::{SqlitePool};
 use tokio::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
 use thiserror::Error;
 
-use shared::{Message};
+use db_queries::{insert_login, insert_chat_message};
+use shared::{Message, timestamp_to_string};
 
 
 #[derive(Error, Debug)]
@@ -27,35 +31,45 @@ pub enum ServerError {
     SharedMutexPoisonedError,
     #[error("failed to forward message to {address}: {detail} ")]
     ForwardMessageError{ address: String, detail: String },
+    #[error("DB error: {0}")]
+    DBError(String),
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 }
 
 
-type ClientMap = HashMap::<SocketAddr, TcpStream>;
+type ClientMap = HashMap::<SocketAddr, (TcpStream, String)>;
 type Clients = Arc<Mutex<ClientMap>>;
 
 
 /// `start_server` is entrypoint of server. It starts main processing loop in a separate thread
 /// while main thread keep8s track on managing new client connections.
-pub async fn start_server(address: &str) -> Result<(), ServerError> {
+pub async fn start_server(
+        address: &str,
+        db_url: &str,
+) -> Result<(), ServerError> {
     let client_map: ClientMap = HashMap::new();
     let clients: Clients = Arc::new(Mutex::new(client_map));
 
+    let pool = match SqlitePool::connect(db_url).await {
+        Ok(pool) => pool,
+        Err(err) => Err(ServerError::DBError(err.to_string()))?,
+    };
+
     let finish_flag = Arc::new(atomic::AtomicBool::new(false));
 
-    let thread_clients = clients.clone();
-    let thread_ok = finish_flag.clone();
+    let task_clients = clients.clone();
+    let task_ok = finish_flag.clone();
     let mut chat_task = Some(tokio::spawn(async move {
-        chat(thread_clients, thread_ok).await
+        chat(task_clients, task_ok, &pool).await
     }));
 
 
-    let thread_address = address.to_string();
-    let thread_clients = clients.clone();
-    let thread_finish_flag = finish_flag.clone();
+    let task_address = address.to_string();
+    let task_clients = clients.clone();
+    let task_finish_flag = finish_flag.clone();
     let mut server_task = Some(tokio::spawn(async move {
-        listen_and_accept(thread_address, thread_clients, thread_finish_flag).await
+        listen_and_accept(task_address, task_clients, task_finish_flag).await
     }));
 
     let res: Result<(), ServerError> = Ok(());
@@ -97,10 +111,12 @@ pub async fn start_server(address: &str) -> Result<(), ServerError> {
 
 /// `listen_and_accept` take care of connection of new client connections.
 async fn listen_and_accept(
-    address: String,
-    clients: Clients,
-    finish_flag: Arc<atomic::AtomicBool>,
+        address: String,
+        clients: Clients,
+        finish_flag: Arc<atomic::AtomicBool>,
 ) -> Result<(), ServerError> {
+    let mut connections = 0_u64;
+
     let listener = match TcpListener::bind(address).await {
         Ok(listener) => listener,
         Err(err) => Err(ServerError::PortBindError(err.to_string()))?,
@@ -117,9 +133,11 @@ async fn listen_and_accept(
         if finish_flag.load(Relaxed) {
             eprintln!("SERVER THREAD: got finish signal");
             break
-        }
+        };
 
-        clients.lock().await.insert(address, stream);
+        connections += 1;
+        let temporary_login = format!("unknown {}", connections.to_string());
+        clients.lock().await.insert(address, (stream, temporary_login));
     }
 
     Ok(())
@@ -131,12 +149,14 @@ async fn listen_and_accept(
 ///   2. broadcast each received message to each other connected client
 ///   3. removal of disconnected clients from the internal map
 async fn chat(
-    clients: Clients,
-    finish_flag: Arc<atomic::AtomicBool>,
+        clients: Clients,
+        finish_flag: Arc<atomic::AtomicBool>,
+        pool: &SqlitePool,
 )  -> Result<(), ServerError> {
     let delay = time::Duration::from_micros(10);
-    let mut message_queue: Vec<(SocketAddr, Message)> = vec![];
+    let mut message_queue: Vec<(SocketAddr, Message, String)> = vec![];
     let mut close_queue: Vec<SocketAddr> = vec![];
+    let mut rename_queue: Vec<(SocketAddr, String)> = vec![];
 
     loop {
         // Detection of error from the other thread.
@@ -146,16 +166,31 @@ async fn chat(
 
         message_queue.clear();
         close_queue.clear();
+        rename_queue.clear();
 
         {
             let mut client_map = clients.lock().await;
 
             // Receiving messages from clients and storing them into `message_queue`.
-            for (address, stream) in client_map.iter_mut() {
+            for (address, (stream, login)) in client_map.iter_mut() {
                 let message = Message::receive(stream).await;
                 match message {
+                    Ok(Some(Message::Login {login, pass})) => {
+                        // Empty password is simulation of wrong password - using timeout on side
+                        // of client to forcibly disconnect.
+                        if !pass.is_empty() {
+                            let welcome_message = format!("Welcome to x-chat {}!", login);
+                            rename_queue.push((address.clone(), login));
+                            let response = Message::Welcome {
+                                motd: welcome_message,
+                            };
+                            if let Err(err) = response.send(stream).await {
+                                eprintln!("failed to send welcome message: {}", err.to_string());
+                            }
+                        }
+                    },
                     Ok(Some(message)) =>
-                        message_queue.push((address.clone(), message)),
+                        message_queue.push((address.clone(), message, login.clone())),
                     Ok(None) =>
                         continue,
                     Err(err) => match err.downcast_ref::<std::io::Error>() {
@@ -177,24 +212,39 @@ async fn chat(
 
         // Broadcasting messages stored in `message_queue`.
         if !message_queue.is_empty() {
-            for (address, message) in message_queue.iter_mut() {
-                match send_to_everyone_else(&clients, address, message).await {
+            for (address, message, login) in message_queue.iter_mut() {
+                match send_to_everyone_else(&clients, address, message, login, &pool).await {
                     Ok(_) => {},
                     Err(err) => eprintln!("sending failed: {}", err.to_string()),
                 }
             }
         }
 
-        // Removal of disconnected clients.
+        // Removal of disconnected clients (writing also login/address for better debugging).
         if !close_queue.is_empty() {
             for address in close_queue.iter() {
-                println!("Disconnected client {}", address.to_string());
-                clients.lock().await.remove(address);
+                let mut clients = clients.lock().await;
+
+                if let Some((_stream, login)) = clients.get(address) {
+                    println!("Disconnected client {}/{}", login, address.to_string());
+                    clients.remove(address);
+                }
             }
-            // close_queue.par_iter().for_each(|address| {
-            //     println!("Disconnected client {}", address.to_string());
-            //     clients.lock().unwrap().remove(address);
-            // });
+        }
+
+        // Renaming of authenticated clients.
+        if !rename_queue.is_empty() {
+            for (address, login) in rename_queue.iter() {
+                clients.lock().await.entry(*address).and_modify(|client| {
+                    client.1 = login.clone();
+                });
+
+                // Saving a row into DB.
+                let timestamp = timestamp_to_string(SystemTime::now());
+                if let Err(err) = insert_login(pool, login, &timestamp).await {
+                    eprintln!("saving login entry failed: {}", err.to_string());
+                }
+            }
         }
 
         sleep(delay);
@@ -204,11 +254,24 @@ async fn chat(
 
 /// `send_to_everyone_else` process sending of message to every client other to the message sender.
 async fn send_to_everyone_else(
-    clients: &Clients,
-    source_address: &SocketAddr,
-    message: &Message,
+        clients: &Clients,
+        source_address: &SocketAddr,
+        message: &mut Message,
+        login: &String,
+        pool: &SqlitePool,
 ) -> Result<(), ServerError> {
-    for (address, stream) in clients.lock().await.iter_mut() {
+    if let Message::Text(text) = message {
+        // Saving a row into DB.
+        let timestamp = timestamp_to_string(SystemTime::now());
+        let result = insert_chat_message(pool, login, &timestamp, &text).await;
+        if let Err(err) = result {
+            eprintln!("saving chat message entry failed: {}", err.to_string());
+        }
+
+        *message = Message::Text(format!("{}: {}", login, text));
+    }
+
+    for (address, (stream, _login)) in clients.lock().await.iter_mut() {
         if address == source_address {
             continue
         }

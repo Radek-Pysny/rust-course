@@ -5,18 +5,23 @@ use server::start_server;
 async fn main() {
     let mut hostname = "localhost".to_string();
     let mut port = 11111_u16;
+    let mut db_url = "sqlite:data.db".to_string();
 
-    parse_arguments(&mut hostname, &mut port);
+    parse_arguments(&mut hostname, &mut port, &mut db_url);
 
     let address = format!("{}:{}", hostname, port);
 
-    if let Err(err) = start_server(&address).await {
+    if let Err(err) = start_server(&address, &db_url).await {
         eprintln!("{}", err);
     }
 }
 
 
-fn parse_arguments(hostname: &mut String, port: &mut u16) {
+fn parse_arguments(
+        hostname: &mut String,
+        port: &mut u16,
+        db_url: &mut String,
+) {
     use argparse::{ArgumentParser, Store};
     use std::process::exit;
 
@@ -28,10 +33,13 @@ fn parse_arguments(hostname: &mut String, port: &mut u16) {
         ap.set_description("Client for chat communication service.");
 
         ap.refer(hostname)
-            .add_option(&["-h", "--host"], Store, "Hostname (e.g. localhost).");
+            .add_option(&["-h", "--host"], Store, "Hostname (e.g. `localhost`).");
 
         ap.refer(&mut _port)
-            .add_option(&["-p", "--port"], Store, "Port number (e.g. 11111).");
+            .add_option(&["-p", "--port"], Store, "Port number (e.g. `11111`).");
+
+        ap.refer(db_url)
+            .add_option(&["--db-url"], Store, "DB URL (e.g. `sqlite:data.db`).");
 
         if let Err(error_code) = ap.parse_args() {
             exit(error_code);

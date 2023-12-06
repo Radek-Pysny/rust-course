@@ -1,7 +1,10 @@
 mod commands;
 
+use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::SystemTime;
 
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt};
@@ -15,7 +18,7 @@ use ::anyhow as eyre;
 use eyre::{anyhow, bail, Result, Context};
 
 use commands::{Command, MessageType};
-use shared::{Message};
+use shared::{Message, timestamp_to_string};
 
 
 #[repr(u8)]
@@ -27,7 +30,11 @@ enum OutputType {
 
 /// `run_interactive` is an entry point for interactive mode of this program.
 /// It spins up three async tasks (input processing, server communication, and printing).
-pub async fn run_interactive(address: &str) -> Result<()> {
+pub async fn run_interactive(
+        address: &str,
+        user_login: &str,
+        user_pass: &str,
+) -> Result<()> {
     #[cfg(debug_assertions)]
     color_eyre::install()?;
 
@@ -37,6 +44,12 @@ pub async fn run_interactive(address: &str) -> Result<()> {
         Ok(stream) => stream,
         Err(err) => bail!("failed to connect: {}", err.to_string()),
     };
+
+    // Login process.
+    match _login(&mut stream, user_login, user_pass).await {
+        Ok(motd) => println!("connected!\n{}", motd),
+        Err(err) => bail!("failed to authenticate: {}", err.to_string()),
+    }
 
     // Channel for sending of commands from input task to processing task.
     let (tx_cmd, rx_cmd) =
@@ -150,6 +163,12 @@ pub async fn run_interactive(address: &str) -> Result<()> {
                     }
                 },
 
+                Ok(Some(_)) => {
+                    tx_print
+                        .send((OutputType::ErrorOutput, "invalid message".to_string()))
+                        .unwrap();
+                },
+
                 // write error message for any error that could possibly occur
                 Err(err) => {
                     let error_message = err.to_string();
@@ -188,13 +207,7 @@ pub async fn run_interactive(address: &str) -> Result<()> {
 /// `save_image` save image as <timestamp>.png file under `images/` subdirectory. It expects, that
 /// conversion of any image format was done by the client that sent image.
 async fn save_image(payload: Vec<u8>) -> Result<()> {
-    use chrono::offset::Local;
-    use chrono::DateTime;
-    use std::time::SystemTime;
-
-    let now: DateTime<Local> = SystemTime::now().into();
-    let timestamp = now.format("%Y-%m-%dT%H:%M:%S");
-
+    let timestamp = timestamp_to_string(SystemTime::now());
     let filepath_str = format!("./images/{}.png", timestamp);
     let filepath = Path::new(filepath_str.as_str());
 
@@ -232,5 +245,28 @@ async fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     match f.write_all(&content).await {
         Ok(_) => Ok(()),
         Err(err) => Err(anyhow!("failed to write into file: {}", err.to_string())),
+    }
+}
+
+
+/// `login` take care of client authentication right after establishing a connection to the server.
+pub async fn _login(stream: &mut TcpStream, login: &str, pass: &str) -> Result<String> {
+    print!("Connection in progress...");
+    let _ = io::stdout().flush();
+
+    let message = Message::Login {
+        login: login.to_string(),
+        pass: pass.to_uppercase(),  // imagine that conversion to uppercase is password hashing
+    };
+
+    match message.send(stream).await {
+        Ok(_) => {},
+        Err(err) => bail!("failed to send authentication: {}", err.to_string()),
+    };
+
+    match Message::receive_with_timeout(stream, Duration::from_secs(5)).await {
+        Ok(Some(Message::Welcome {motd})) => Ok(motd),
+        Ok(_) => Err(anyhow!("authentication failed")),
+        Err(err) => Err(err),
     }
 }
