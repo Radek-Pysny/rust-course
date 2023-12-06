@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Command","MessageType"],"fn":["check_image"]};

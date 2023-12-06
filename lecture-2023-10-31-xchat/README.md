@@ -41,3 +41,5 @@ Or put a `.env` file into root of server crate with almost that line:
     checked for not being empty. If one gets an empty password, no welcome message is sent to the client and client is
     automatically disconnected within 5 second delay.
 - The login sent by client is used on the server side to mark just text messages with prefix (as in good old chat apps).
+
+- Introduced `cargo docx` alias to have easier way to get the desired documentation. One can add `--open` if wanted.
