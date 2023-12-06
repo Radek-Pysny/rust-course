@@ -1,13 +1,27 @@
 use std::io;
-use std::io::{Read, Write};
-use std::net::{TcpStream};
 
+use color_eyre::eyre::{bail, Result};
 use serde::{Serialize, Deserialize};
 use serde_cbor;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream};
+use tokio::time::{Duration, timeout};
+
 
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum Message {
+    /// Login message (client -> server).
+    Login{
+        login: String,
+        pass: String,
+    },
+
+    /// Welcome message (server -> client).
+    Welcome{
+        motd: String,
+    },
+
     /// Simple text message.
     Text(String),
 
@@ -31,29 +45,56 @@ impl Message {
         serde_cbor::from_slice(&payload)
     }
 
-    pub fn send(&self, stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send(&self, stream: &mut TcpStream) -> Result<()> {
         let serialized = self.serialize()?;
         let length = serialized.len() as u32;
 
-        stream.write(&length.to_be_bytes())?;
-        stream.write_all(&serialized)?;
+        stream.write(&length.to_be_bytes()).await?;
+        stream.write_all(&serialized).await?;
 
         Ok(())
     }
 
-    pub fn receive(stream: &mut TcpStream) -> Result<Option<Message>, Box<dyn std::error::Error>> {
+    pub async fn receive(stream: &mut TcpStream) -> Result<Option<Message>> {
         let mut length_bytes = [0u8; 4];
-        match stream.read_exact(&mut length_bytes) {
+        match stream.try_read(&mut length_bytes) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
             Ok(_) => {},
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(None);
-            },
-            Err(error) => return Err(Box::new(error)),
+            }
+            Err(err) => bail!(err),
         }
         let length = u32::from_be_bytes(length_bytes) as usize;
 
         let mut message_bytes = vec![0u8; length];
-        stream.read_exact(&mut message_bytes)?;
+        stream.read_exact(&mut message_bytes).await?;
+
+        let message = Message::deserialize(&message_bytes)?;
+        Ok(Some(message))
+    }
+
+    pub async fn receive_with_timeout(
+        stream: &mut TcpStream,
+        duration: Duration,
+    ) -> Result<Option<Message>> {
+        let mut length_bytes = [0u8; 4];
+
+        match timeout(duration, stream.read_exact(&mut length_bytes)).await? {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
+            Ok(_) => {},
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(None);
+            }
+            Err(err) => bail!(err),
+        };
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        let mut message_bytes = vec![0u8; length];
+        let result = timeout(Duration::from_secs(1), stream.read_exact(&mut message_bytes)).await?;
+        if let Err(err) = result {
+            bail!(err.to_string());
+        };
 
         let message = Message::deserialize(&message_bytes)?;
         Ok(Some(message))
