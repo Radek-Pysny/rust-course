@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Message"],"fn":["panic_to_text","timestamp_to_string"],"mod":["message","panic","timestamp"]};

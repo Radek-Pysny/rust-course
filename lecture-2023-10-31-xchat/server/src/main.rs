@@ -17,6 +17,8 @@ async fn main() {
 }
 
 
+/// `parse_arguments` uses [argparse](https://crates.io/crates/argparse) crate to parse command-line
+/// options.
 fn parse_arguments(
         hostname: &mut String,
         port: &mut u16,

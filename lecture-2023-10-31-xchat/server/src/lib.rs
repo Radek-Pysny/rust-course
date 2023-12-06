@@ -144,11 +144,17 @@ async fn listen_and_accept(
 }
 
 
-/// `chat` implement main processing loop divided into three phases:
+/// `chat` implement main processing loop.
+///
+///  It is divided into the following phases:
 ///   1. try to receive a message from each of connected clients
 ///   2. broadcast each received message to each other connected client
-///   3. removal of disconnected clients from the internal map
+///   3. removal of disconnected clients from the internal client map
+///   4. renaming of authenticated clients (by default they have name in a form `unknown N`, where
+///         `N` is a number from internal running sequence and they got the name/login based on
+///         the content of the `Login` message received from client during authentication phase).
 async fn chat(
+        // Map of clients shared across threads.
         clients: Clients,
         finish_flag: Arc<atomic::AtomicBool>,
         pool: &SqlitePool,

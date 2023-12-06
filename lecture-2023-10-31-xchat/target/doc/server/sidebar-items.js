@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ServerError"],"fn":["chat","listen_and_accept","send_to_everyone_else","start_server"],"mod":["db_queries"],"type":["ClientMap","Clients"]};
