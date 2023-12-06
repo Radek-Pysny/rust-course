@@ -1,16 +1,24 @@
 mod commands;
 
+use std::io;
 use std::io::Write;
-use std::fs::{File, create_dir_all};
 use std::path::Path;
-use std::net::TcpStream;
 use std::str::FromStr;
-use std::sync::mpsc::{channel, TryRecvError};
-use std::thread::{self, JoinHandle};
-use std::time;
+use std::time::SystemTime;
+
+use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt};
+use tokio::fs::{File, create_dir_all};
+use tokio::time::{sleep, Duration};
+
+#[cfg(debug_assertions)]
+use color_eyre::eyre;
+#[cfg(not(debug_assertions))]
+use ::anyhow as eyre;
+use eyre::{anyhow, bail, Result, Context};
 
 use commands::{Command, MessageType};
-use shared::Message;
+use shared::{Message, timestamp_to_string};
 
 
 #[repr(u8)]
@@ -21,37 +29,47 @@ enum OutputType {
 
 
 /// `run_interactive` is an entry point for interactive mode of this program.
-/// It spins up two threads (one for processing of input and one for text processing itself).
-pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+/// It spins up three async tasks (input processing, server communication, and printing).
+pub async fn run_interactive(
+        address: &str,
+        user_login: &str,
+        user_pass: &str,
+) -> Result<()> {
+    #[cfg(debug_assertions)]
+    color_eyre::install()?;
+
     const ERROR_PREFIX: &str = "ERROR: ";
 
-    let mut stream = match TcpStream::connect(address) {
+    let mut stream = match TcpStream::connect(address).await {
         Ok(stream) => stream,
-        Err(err) => Err(format!("failed to connect: {}", err.to_string()))?,
+        Err(err) => bail!("failed to connect: {}", err.to_string()),
     };
-    if let Err(err) = stream.set_nonblocking(true) {
-        Err(format!("failed to set stream attribute: {}", err.to_string()))?;
+
+    // Login process.
+    match _login(&mut stream, user_login, user_pass).await {
+        Ok(motd) => println!("connected!\n{}", motd),
+        Err(err) => bail!("failed to authenticate: {}", err.to_string()),
     }
 
-    // Channel for sending of commands from input thread to processing thread.
+    // Channel for sending of commands from input task to processing task.
     let (tx_cmd, rx_cmd) =
-        channel::<(MessageType, Option<String>, Option<Vec<u8>>)>();
+        flume::unbounded::<(MessageType, Option<String>, Option<Vec<u8>>)>();
 
     // Channel for accepting of any messages to be print out on a stdout or stderr.
-    let (tx_print, rx_print) = channel::<(OutputType, String)>();
+    let (tx_print, rx_print) = flume::unbounded::<(OutputType, String)>();
 
-    // Input thread takes care of reading from stdio, parsing `Action` and sending it together with
-    // the rest text on the line over the channel to the processing thread.
-    let tx_print_for_input_thread = tx_print.clone();
-    let input_thread_handle = thread::spawn(move || {
-        let tx_print = tx_print_for_input_thread;
+    // Input task takes care of reading from stdio, parsing `Action` and sending it together with
+    // the rest text on the line over the channel to the processing task.
+    let tx_print_for_input_task = tx_print.clone();
+    let input_task = tokio::spawn(async move {
+        let tx_print = tx_print_for_input_task;
         let mut text: String = String::new();
         loop {
             text.clear();
 
             let count = std::io::stdin().read_line(&mut text);
             if count.is_err() {
-                return Err(count.err().unwrap().to_string());
+                bail!("failed to read from stdin: {}", count.err().unwrap().to_string());
             }
             if let Ok(0) = count { // no \n character -> finished by Ctrl+D
                 return Ok(());
@@ -74,12 +92,12 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
         }
     });
 
-    // Processing thread awaits a tuples (with action and text to be processed) from the input
+    // Processing task awaits a tuples (with action and text to be processed) from the input
     // channel, process the input text and prints output to the stdout.
-    let processing_thread_handle = thread::spawn(move || {
+    let process_task = tokio::spawn(async move {
         let tx_print = tx_print;    // takes ownership
         let mut processed = (false, false);
-        let delay = time::Duration::from_millis(10);
+        let delay = Duration::from_millis(10);
 
         loop {
             // Processing command for sending a message to the server.
@@ -96,20 +114,20 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
                         _ => continue,
                     };
 
-                    match message.send(&mut stream) {
+                    match message.send(&mut stream).await {
                         Ok(_) => {},
                         Err(err) => tx_print.
                             send((OutputType::ErrorOutput,format!("{}", err.to_string()))).
                             unwrap(),
                     }
                 }
-                Err(TryRecvError::Empty) => processed.0 = false, // nothing to be send to server
-                Err(TryRecvError::Disconnected) => break,
+                Err(flume::TryRecvError::Empty) => processed.0 = false, // nothing to be send
+                Err(flume::TryRecvError::Disconnected) => break,
             }
 
             // Processing messages received from the server.
             processed.1 = true;
-            match Message::receive(&mut stream) {
+            match Message::receive(&mut stream).await {
                 // nothing incoming from the server
                 Ok(None) => processed.1 = false,
 
@@ -124,7 +142,7 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
                         .send((OutputType::StandardOutput, "Receiving image...".to_string()))
                         .unwrap();
 
-                    if let Err(err) = save_image(payload) {
+                    if let Err(err) = save_image(payload).await {
                         let error_message = format!("Failed to save image: {}", err);
                         tx_print
                             .send((OutputType::ErrorOutput, error_message))
@@ -137,7 +155,7 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
                     let info_text = format!("Receiving {}", filename);
                     tx_print.send((OutputType::StandardOutput, info_text)).unwrap();
 
-                    if let Err(err) = save_file(&filename, payload) {
+                    if let Err(err) = save_file(&filename, payload).await {
                         let error_message = format!("Failed to save file: {}", err);
                         tx_print
                             .send((OutputType::ErrorOutput, error_message))
@@ -145,24 +163,31 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
                     }
                 },
 
+                Ok(Some(_)) => {
+                    tx_print
+                        .send((OutputType::ErrorOutput, "invalid message".to_string()))
+                        .unwrap();
+                },
+
                 // write error message for any error that could possibly occur
                 Err(err) => {
-                    tx_print.send((OutputType::ErrorOutput, err.to_string())).unwrap();
-                    return Err(err.to_string());
+                    let error_message = err.to_string();
+                    tx_print.send((OutputType::ErrorOutput, error_message.clone())).unwrap();
+                    bail!("failed to receive a message from the server: {}", error_message);
                 }
             }
 
             // Optional sleep that takes part in case of nothing being processed at this loop round.
             if let (false, false) = processed {
-                thread::sleep(delay);
+                sleep(delay).await;
             }
         }
 
-        Ok::<(), String>(())
+        Ok(())
     });
 
-    // Printing thread takes care of any prints to stdout or stderr.
-    let printing_thread_handle = thread::spawn(move || {
+    // Printing task takes care of any prints to stdout or stderr.
+    let print_task = tokio::spawn(async move {
         while let Ok(request) = rx_print.recv() {
             match request {
                 (OutputType::StandardOutput, text) => println!("{}", text),
@@ -173,78 +198,75 @@ pub fn run_interactive(address: &str) -> std::result::Result<(), Box<dyn std::er
        Ok::<(), String>(())
     });
 
-    // Trial to do there some reasonable clean up after the threads has finished their work.
-    join_thread(input_thread_handle, "input thread")?;
-    join_thread(processing_thread_handle, "processing thread")?;
-    join_thread(printing_thread_handle, "printing thread")
-}
+    let _ = tokio::try_join!(input_task, process_task, print_task);
 
-
-/// `print_help` print help text on stdout.
-// pub fn print_help() {
-//     let bin_name = &env::args().take(1).collect::<Vec<String>>()[0];
-//     let action_list = Action::iter().map(|a|a.to_string()).collect::<Vec<_>>();
-//
-//     println!("Usage:");
-//     println!("   {} <action>", bin_name);
-//     println!("        where action is one of: {}.", action_list.join(", "));
-// }
-
-
-/// `join_thread` is just a helper function converting possible errors from thread panicking.
-fn join_thread<T>(
-    handle: JoinHandle<T>,
-    thread_name: &str,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    if let Err(err) = handle.join() {
-        let error_message = match err.downcast_ref::<&str>() {
-            Some(err) => *err,
-            None => "unknown error",
-        };
-        Err(format!("{} panicked: {}", thread_name, error_message))?;
-    };
     Ok(())
 }
 
 
-fn save_image(payload: Vec<u8>) -> Result<(), String> {
-    use chrono::offset::Local;
-    use chrono::DateTime;
-    use std::time::SystemTime;
+/// `save_image` save image as <timestamp>.png file under `images/` subdirectory. It expects, that
+/// conversion of any image format was done by the client that sent image.
+async fn save_image(payload: Vec<u8>) -> Result<()> {
+    let timestamp = timestamp_to_string(SystemTime::now());
+    let filepath_str = format!("./images/{}.png", timestamp);
+    let filepath = Path::new(filepath_str.as_str());
 
-    let now: DateTime<Local> = SystemTime::now().into();
-    let timestamp = now.format("%Y-%m-%dT%H:%I");
-
-    let filepath = format!("./images/{}.png", timestamp);
-    let filepath = Path::new(filepath.as_str());
-
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).await.with_context(||
+        format!("saving image: {}", filepath_str)
+    )
 }
 
 
-fn save_file(filename: &String, payload: Vec<u8>) -> Result<(), String> {
-    let filepath = format!("./files/{}", filename);
-    let filepath = Path::new(filepath.as_str());
+/// `save_file` save general file into `files/` subdirectory.
+async fn save_file(filename: &String, payload: Vec<u8>) -> Result<()> {
+    let filepath_str = format!("./files/{}", filename);
+    let filepath = Path::new(filepath_str.as_str());
 
-    _save_file(&filepath, payload)
+    _save_file(&filepath, payload).await.with_context(||
+        format!("saving file: {}", filepath_str)
+    )
 }
 
 
-fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<(), String> {
+/// `_save_file` is just a helper function that saved what is needed in the given filepath.
+async fn _save_file(filepath: &Path, content: Vec<u8>) -> Result<()> {
     // create needed directories on path to the target file (if needed)
-    if let Err(err) = create_dir_all(filepath.parent().unwrap()) {
-        Err(err.to_string())?;
+    if let Err(err) = create_dir_all(filepath.parent().unwrap()).await {
+        bail!("failed to prepare directories: {}", err.to_string());
     }
 
     // create a new file (possibly truncating any already existing)
-    let mut f = match File::create(&filepath) {
+    let mut f = match File::create(&filepath).await {
         Ok(file) => file,
-        Err(err) => Err(err.to_string())?,
+        Err(err) => bail!("failed to create file: {}", err.to_string()),
     };
 
     // write all the binary data into an empty file open for writing
-    match f.write_all(&content) {
+    match f.write_all(&content).await {
         Ok(_) => Ok(()),
-        Err(err) => Err(err.to_string()),
+        Err(err) => Err(anyhow!("failed to write into file: {}", err.to_string())),
+    }
+}
+
+
+/// `login` take care of client authentication right after establishing a connection to the server.
+pub async fn _login(stream: &mut TcpStream, login: &str, pass: &str) -> Result<String> {
+    print!("Connection in progress...");
+    let _ = io::stdout().flush();
+
+    let message = Message::Login {
+        login: login.to_string(),
+        pass: pass.to_uppercase(),  // imagine that conversion to uppercase is password hashing
+    };
+
+    match message.send(stream).await {
+        Ok(_) => {},
+        Err(err) => bail!("failed to send authentication: {}", err.to_string()),
+    };
+
+    match Message::receive_with_timeout(stream, Duration::from_secs(5)).await {
+        Ok(Some(Message::Welcome {motd})) => Ok(motd),
+        Ok(_) => Err(anyhow!("authentication failed")),
+        Err(err) => Err(err),
     }
 }
