@@ -1,41 +1,22 @@
 mod db_queries;
+mod web;
+mod error;
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr};
 use std::sync::{Arc, atomic};
 use std::sync::atomic::Ordering::Relaxed;
-use std::thread::{sleep};
-use std::time::{self, SystemTime};
+use std::time::{SystemTime};
 
 use sqlx::sqlite::{SqlitePool};
 use tokio::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use thiserror::Error;
+use tokio::task::JoinSet;
 
 use db_queries::{insert_login, insert_chat_message};
 use shared::{Message, timestamp_to_string};
-
-
-#[derive(Error, Debug)]
-pub enum ServerError {
-    #[error("failed port binding: {0}")]
-    PortBindError(String),
-    #[error("failed to establish client connection: {0}")]
-    ClientConnectionError(String),
-    #[error("failed to get peer address after client connection: {0}")]
-    ClientPeerAddressError(String),
-    #[error("failed stream configuration after client connection: {0}")]
-    ClientStreamConfigError(String),
-    #[error("internal error: detected poisoned mutex")]
-    SharedMutexPoisonedError,
-    #[error("failed to forward message to {address}: {detail} ")]
-    ForwardMessageError{ address: String, detail: String },
-    #[error("DB error: {0}")]
-    DBError(String),
-    #[error(transparent)]
-    IOError(#[from] std::io::Error),
-}
+use crate::error::ServerError;
 
 
 type ClientMap = HashMap::<SocketAddr, (TcpStream, String)>;
@@ -47,7 +28,10 @@ type Clients = Arc<Mutex<ClientMap>>;
 pub async fn start_server(
         address: &str,
         db_url: &str,
+        web_port: u16,
 ) -> Result<(), ServerError> {
+    let mut join_set = JoinSet::new();
+
     let client_map: ClientMap = HashMap::new();
     let clients: Clients = Arc::new(Mutex::new(client_map));
 
@@ -58,54 +42,35 @@ pub async fn start_server(
 
     let finish_flag = Arc::new(atomic::AtomicBool::new(false));
 
+    // chat task
     let task_clients = clients.clone();
     let task_ok = finish_flag.clone();
-    let mut chat_task = Some(tokio::spawn(async move {
+    join_set.spawn(async move {
         chat(task_clients, task_ok, &pool).await
-    }));
+    });
 
-
+    // server task
     let task_address = address.to_string();
     let task_clients = clients.clone();
     let task_finish_flag = finish_flag.clone();
-    let mut server_task = Some(tokio::spawn(async move {
+    join_set.spawn(async move {
         listen_and_accept(task_address, task_clients, task_finish_flag).await
-    }));
+    });
 
-    let res: Result<(), ServerError> = Ok(());
-    loop {
-        if chat_task.is_none() && server_task.is_none() {
-            break
+    // web task
+    join_set.spawn(async move {
+        web::start_web_server(web_port).await
+    });
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(_)) => {},
+            Ok(Err(err)) => eprint!("server error: {}", err.to_string()),
+            Err(err) => eprint!("join error: {}", err.to_string()),
         }
+    };
 
-        if let Some(handle) = chat_task.as_ref() {
-            if handle.is_finished() {
-                match tokio::try_join!(chat_task.take().unwrap()) {
-                    Ok((Ok(_),)) => {},
-                    Ok((Err(err),)) => eprintln!("CHAT THREAD ERROR: {}", err),
-                    Err(err) => {
-                        eprintln!("CHAT THREAD PANIC: {}", err.to_string())
-                    },
-                };
-                finish_flag.store(true, Relaxed);
-            }
-        }
-
-        if let Some(handle) = server_task.as_ref() {
-            if handle.is_finished() {
-                match tokio::try_join!(server_task.take().unwrap()) {
-                    Ok((Ok(_),)) => {},
-                    Ok((Err(err),)) => eprintln!("SERVER THREAD ERROR: {}", err),
-                    Err(err) => {
-                        eprintln!("SERVER THREAD PANIC: {}", err.to_string());
-                    }
-                }
-                finish_flag.store(true, Relaxed);
-            }
-        }
-    }
-
-    res
+    Ok(())
 }
 
 
@@ -128,8 +93,7 @@ async fn listen_and_accept(
             Err(err) => Err(ServerError::ClientConnectionError(err.to_string()))?,
         };
 
-        // Detection of error from the other thread.
-        // TODO: incomming is blocking, so we would detect it currently only on any new client conn.
+        // Detection of error from the other thread.s
         if finish_flag.load(Relaxed) {
             eprintln!("SERVER THREAD: got finish signal");
             break
@@ -159,7 +123,6 @@ async fn chat(
         finish_flag: Arc<atomic::AtomicBool>,
         pool: &SqlitePool,
 )  -> Result<(), ServerError> {
-    let delay = time::Duration::from_micros(10);
     let mut message_queue: Vec<(SocketAddr, Message, String)> = vec![];
     let mut close_queue: Vec<SocketAddr> = vec![];
     let mut rename_queue: Vec<(SocketAddr, String)> = vec![];
@@ -252,8 +215,6 @@ async fn chat(
                 }
             }
         }
-
-        sleep(delay);
     }
 }
 
