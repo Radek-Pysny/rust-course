@@ -3,7 +3,7 @@ mod web;
 mod error;
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::net::{SocketAddr};
 use std::sync::{Arc};
 use std::time::{SystemTime};
@@ -189,7 +189,7 @@ async fn listen_and_accept(
                 task_close_sender,
                 task_rename_sender,
                 chat_receiver,
-            )
+            ).await
         });
     }
 }
@@ -205,7 +205,6 @@ async fn client(
     chat_receiver: flume::Receiver<ChatMessage>,
 ) -> Result<(), ServerError> {
     loop {
-        print!("abc");
         tokio::select! {
             message = Message::blocking_receive(&mut stream) => {
                 match message {
