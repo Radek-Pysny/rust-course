@@ -11,6 +11,8 @@ pub enum ServerError {
     ClientPeerAddressError(String),
     #[error("failed stream configuration after client connection: {0}")]
     ClientStreamConfigError(String),
+    #[error("error sending message to client")]
+    ClientSendError(String),
     #[error("internal error: detected poisoned mutex")]
     SharedMutexPoisonedError,
     #[error("failed to forward message to {address}: {detail} ")]
@@ -23,4 +25,6 @@ pub enum ServerError {
     IOError(#[from] std::io::Error),
     #[error("join error: {0}")]
     JoinError(String),
+    #[error("unspecified error: {0}")]
+    UnspecifiedError(String),
 }

@@ -11,7 +11,7 @@ use tokio::time::{Duration, timeout};
 
 /// `Message` is a type representing all messages that might be transferred between server and
 /// client via TCP stream.
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum Message {
     /// Login message (client -> server).
     Login{
@@ -59,6 +59,23 @@ impl Message {
         stream.write_all(&serialized).await?;
 
         Ok(())
+    }
+
+    /// `blocking_receive` blocks receiving from the given TCP `stream`.
+    pub async fn blocking_receive(stream: &mut TcpStream) -> Result<Option<Message>> {
+        let mut length_bytes = [0u8; 4];
+        match stream.read_exact(&mut length_bytes).await {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
+            Ok(_) => {},
+            Err(err) => bail!(err),
+        }
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        let mut message_bytes = vec![0u8; length];
+        stream.read_exact(&mut message_bytes).await?;
+
+        let message = Message::deserialize(&message_bytes)?;
+        Ok(Some(message))
     }
 
     /// `receive` try to receive a message from the given TCP `stream` in a non-blocking manner.
