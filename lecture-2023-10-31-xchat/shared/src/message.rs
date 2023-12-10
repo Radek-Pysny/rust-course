@@ -39,6 +39,16 @@ pub enum Message {
 
 
 impl Message {
+    pub fn info(&self) -> String {
+        match self {
+            Message::Login {login, ..} => format!("<Message login: {}>", login),
+            Message::Welcome {..} => format!("<Message welcome>"),
+            Message::Text(text) => format!("<Message text: {}>", text),
+            Message::File {filename, ..} => format!("<Message file: {}>", filename),
+            Message::Image(payload) => format!("<Message image: {}>", payload.len()),
+        }
+    }
+
     /// `serialize` take care of serialization process into [CBOR](https://cbor.io/) binary format
     /// using [serde](https://serde.rs/).
     pub fn serialize(&self) -> serde_cbor::Result<Vec<u8>> {

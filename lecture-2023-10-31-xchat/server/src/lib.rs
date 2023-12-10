@@ -3,11 +3,10 @@ mod web;
 mod error;
 
 use std::collections::HashMap;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind};
 use std::net::{SocketAddr};
 use std::sync::{Arc};
 use std::time::{SystemTime};
-use axum::serve::Serve;
 
 use sqlx::sqlite::{SqlitePool};
 use tokio::sync::Mutex;
@@ -212,49 +211,58 @@ async fn client(
                         // Empty password is simulation of wrong password - using timeout on side
                         // of client to forcibly disconnect.
                         if !pass.is_empty() {
+                            let ok = format!("Client logged in: {}", login);
                             let welcome_message = format!("Welcome to x-chat {}!", login);
                             let rename_message = RenameMessage {
                                 address: address.clone(),
                                 login,
                             };
-                            match rename_sender.send(rename_message) {
-                                Ok(_) => {
-                                    let response = Message::Welcome {
-                                        motd: welcome_message,
-                                    };
-                                    if let Err(err) = response.send(&mut stream).await {
-                                        Err(ServerError::ClientSendError(err.to_string()))?;
-                                    }
-                                },
-                                Err(err) => Err(ServerError::UnspecifiedError(err.to_string()))?,
-                            }
+                            if let Err(err) = rename_sender.send_async(rename_message).await {
+                                Err(ServerError::UnspecifiedError(err.to_string()))?;
+                            };
+                            let response = Message::Welcome {
+                                motd: welcome_message,
+                            };
+                            if let Err(err) = response.send(&mut stream).await {
+                                Err(ServerError::ClientSendError(err.to_string()))?;
+                            };
+                            println!("{}", ok);
                         }
                     },
                     Ok(Some(received_message)) => {
-                        if let Some(Some(current_login)) = clients.lock().await.get(&address).map(
+                        match clients.lock().await.get(&address).map(
                             |client_record| client_record.login.clone()
                         ) { // not yet authenticated user (without login) cannot send any message
-                            let message_to_send = ChatMessage {
-                                address: address.clone(),
-                                message: received_message,
-                                login: current_login,
-                            };
-                            match message_sender.send(message_to_send) {
-                                Ok(_) => {},
-                                Err(err) => eprintln!("failed pass sent message to chat: {}", err),
-                            };
+                            Some(Some(current_login)) => {
+                                let ok = format!("Received message from client {}", received_message.info());
+                                let message_to_send = ChatMessage {
+                                    address: address.clone(),
+                                    message: received_message,
+                                    login: current_login.clone(),
+                                };
+                                if let Err(err) = message_sender.send_async(message_to_send).await {
+                                    Err(ServerError::UnspecifiedError(err.to_string()))?;
+                                };
+                                println!("{}", ok);
+                            },
+                            _ => {
+                                eprintln!("Ignored message from authenticated user: {}", received_message.info());
+                            },
                         }
                     }
-                    Ok(None) =>
-                        continue,
+                    Ok(None) => {
+                        println!("Received no message from client");
+                        continue
+                    },
                     Err(err) => match err.downcast_ref::<std::io::Error>() {
                         // Detected a disconnected client.
                         Some(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                            let ok = format!("Client disconnected");
                             let close_message = CloseMessage{address: address.clone()};
-                            match close_sender.send(close_message) {
-                                Ok(_) => {},
-                                Err(err) => Err(ServerError::UnspecifiedError(err.to_string()))?,
+                            if let Err(err) = close_sender.send_async(close_message).await {
+                                Err(ServerError::UnspecifiedError(err.to_string()))?;
                             };
+                            println!("{}", ok);
                         },
 
                         Some(err) => eprintln!(
@@ -269,11 +277,15 @@ async fn client(
             }
 
             result = chat_receiver.recv_async() => {
+
                 match result {
-                    Ok(received_message) =>
+                    Ok(received_message) => {
+                        let ok = format!("Broadcasted message to client: {}", received_message.message.info());
                         if let Err(err) = received_message.message.send(&mut stream).await {
                             Err(ServerError::ClientSendError(err.to_string()))?;
-                        },
+                        };
+                        println!("{}", ok);
+                    },
                     Err(err) => Err(ServerError::UnspecifiedError(err.to_string()))?,
                 }
             }
@@ -300,6 +312,7 @@ async fn chat(
     loop {
         match message_receiver.recv() {
             Ok(mut received_message) => {
+                let ok = format!("Chat finished broadcasting message: {}", received_message.message.info());
                 if let Err(err) = send_to_everyone_else(
                     &clients,
                     &received_message.address,
@@ -308,7 +321,8 @@ async fn chat(
                     &pool,
                 ).await {
                     Err(ServerError::UnspecifiedError(err.to_string()))?;
-                }
+                };
+                println!("{}", ok);
             },
             Err(err) => Err(ServerError::UnspecifiedError(err.to_string()))?,
         }
@@ -340,18 +354,21 @@ async fn send_to_everyone_else(
             continue
         }
 
+        let ok = format!("Broadcasting message to client {:?}: {}", client_record.login, message.info());
+
         let message_to_send = ChatMessage{
             address: address.clone(),
             message: message.clone(),
             login: login.clone(),
         };
 
-        if let Err(err) = client_record.sender.send(message_to_send) {
+        if let Err(err) = client_record.sender.send_async(message_to_send).await {
             Err(ServerError::ForwardMessageError{
                 address: address.to_string(),
                 detail: err.to_string(),
             })?;
         }
+        println!("{}", ok);
     }
 
     Ok(())
