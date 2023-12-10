@@ -14,13 +14,28 @@ use tokio::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
-use db_queries::{insert_login, insert_chat_message};
+use db_queries::{insert_login, insert_chat_message, fetch_user_by_login_and_password};
 use shared::{Message, timestamp_to_string};
 use crate::error::ServerError;
 
 
-type ClientMap = HashMap::<SocketAddr, (TcpStream, String)>;
+struct ClientRecord {
+    stream: TcpStream,
+    login: Option<String>,
+    user_id: Option<i64>,
+}
+
+
+type ClientMap = HashMap::<SocketAddr, ClientRecord>;
 type Clients = Arc<Mutex<ClientMap>>;
+
+
+struct MessageRecord {
+    address: SocketAddr,
+    message: Message,
+    login: String,
+    user_id: i64,
+}
 
 
 /// `start_server` is entrypoint of server. It starts main processing loop in a separate thread
@@ -80,8 +95,6 @@ async fn listen_and_accept(
         clients: Clients,
         finish_flag: Arc<atomic::AtomicBool>,
 ) -> Result<(), ServerError> {
-    let mut connections = 0_u64;
-
     let listener = match TcpListener::bind(address).await {
         Ok(listener) => listener,
         Err(err) => Err(ServerError::PortBindError(err.to_string()))?,
@@ -99,9 +112,12 @@ async fn listen_and_accept(
             break
         };
 
-        connections += 1;
-        let temporary_login = format!("unknown {}", connections.to_string());
-        clients.lock().await.insert(address, (stream, temporary_login));
+        let client_record = ClientRecord{
+            stream: stream,
+            login: None,
+            user_id: None,
+        };
+        clients.lock().await.insert(address, client_record);
     }
 
     Ok(())
@@ -114,16 +130,13 @@ async fn listen_and_accept(
 ///   1. try to receive a message from each of connected clients
 ///   2. broadcast each received message to each other connected client
 ///   3. removal of disconnected clients from the internal client map
-///   4. renaming of authenticated clients (by default they have name in a form `unknown N`, where
-///         `N` is a number from internal running sequence and they got the name/login based on
-///         the content of the `Login` message received from client during authentication phase).
 async fn chat(
         // Map of clients shared across threads.
         clients: Clients,
         finish_flag: Arc<atomic::AtomicBool>,
         pool: &SqlitePool,
 )  -> Result<(), ServerError> {
-    let mut message_queue: Vec<(SocketAddr, Message, String)> = vec![];
+    let mut message_queue: Vec<MessageRecord> = vec![];
     let mut close_queue: Vec<SocketAddr> = vec![];
     let mut rename_queue: Vec<(SocketAddr, String)> = vec![];
 
@@ -141,25 +154,49 @@ async fn chat(
             let mut client_map = clients.lock().await;
 
             // Receiving messages from clients and storing them into `message_queue`.
-            for (address, (stream, login)) in client_map.iter_mut() {
-                let message = Message::receive(stream).await;
+            for (address, client_record) in client_map.iter_mut() {
+                let message = Message::receive(&mut client_record.stream).await;
                 match message {
                     Ok(Some(Message::Login {login, pass})) => {
-                        // Empty password is simulation of wrong password - using timeout on side
-                        // of client to forcibly disconnect.
-                        if !pass.is_empty() {
-                            let welcome_message = format!("Welcome to x-chat {}!", login);
-                            rename_queue.push((address.clone(), login));
-                            let response = Message::Welcome {
-                                motd: welcome_message,
-                            };
-                            if let Err(err) = response.send(stream).await {
-                                eprintln!("failed to send welcome message: {}", err.to_string());
+                        // Searching for login & password in the DB as a part of authorization.
+                        match fetch_user_by_login_and_password(pool, &login, &pass).await {
+                            Ok(Some(user)) => {
+                                let welcome_message = format!("Welcome to x-chat {}!", login);
+
+                                client_record.login = Some(login);
+                                client_record.user_id = Some(user.id);
+
+                                let timestamp = timestamp_to_string(SystemTime::now());
+                                if let Err(err) = insert_login(pool, user.id, &timestamp).await {
+                                    eprintln!("saving login entry failed: {}", err.to_string());
+                                }
+                                // rename_queue.push((address.clone(), login));
+
+                                let response = Message::Welcome {
+                                    motd: welcome_message,
+                                };
+
+                                if let Err(err) = response.send(&mut client_record.stream).await {
+                                    eprintln!("failed to send welcome message: {}", err.to_string());
+                                }
+                            },
+                            Ok(None) => continue, // no response -> client is not authorized in timeout
+                            Err(err) => Err(err)?,
+                        };
+                    },
+                    Ok(Some(message)) => {
+                        if let Some(login) = &client_record.login {
+                            if let Some(user_id) = &client_record.user_id {
+                                let message_record = MessageRecord{
+                                    user_id: user_id.clone(),
+                                    login: login.clone(),
+                                    message: message,
+                                    address: address.clone(),
+                                };
+                                message_queue.push(message_record);
                             }
                         }
-                    },
-                    Ok(Some(message)) =>
-                        message_queue.push((address.clone(), message, login.clone())),
+                    }
                     Ok(None) =>
                         continue,
                     Err(err) => match err.downcast_ref::<std::io::Error>() {
@@ -181,8 +218,8 @@ async fn chat(
 
         // Broadcasting messages stored in `message_queue`.
         if !message_queue.is_empty() {
-            for (address, message, login) in message_queue.iter_mut() {
-                match send_to_everyone_else(&clients, address, message, login, &pool).await {
+            for message_record in message_queue.drain(..) {
+                match send_to_everyone_else(&clients, message_record, &pool).await {
                     Ok(_) => {},
                     Err(err) => eprintln!("sending failed: {}", err.to_string()),
                 }
@@ -194,24 +231,14 @@ async fn chat(
             for address in close_queue.iter() {
                 let mut clients = clients.lock().await;
 
-                if let Some((_stream, login)) = clients.get(address) {
-                    println!("Disconnected client {}/{}", login, address.to_string());
+                if let Some(client_record) = clients.get(address) {
+                    let unknown_name = "unknown".to_string();
+                    println!(
+                        "Disconnected client {}/{}",
+                        client_record.login.as_ref().unwrap_or(&unknown_name),
+                        address.to_string(),
+                    );
                     clients.remove(address);
-                }
-            }
-        }
-
-        // Renaming of authenticated clients.
-        if !rename_queue.is_empty() {
-            for (address, login) in rename_queue.iter() {
-                clients.lock().await.entry(*address).and_modify(|client| {
-                    client.1 = login.clone();
-                });
-
-                // Saving a row into DB.
-                let timestamp = timestamp_to_string(SystemTime::now());
-                if let Err(err) = insert_login(pool, login, &timestamp).await {
-                    eprintln!("saving login entry failed: {}", err.to_string());
                 }
             }
         }
@@ -222,28 +249,31 @@ async fn chat(
 /// `send_to_everyone_else` process sending of message to every client other to the message sender.
 async fn send_to_everyone_else(
         clients: &Clients,
-        source_address: &SocketAddr,
-        message: &mut Message,
-        login: &String,
+        mut message_record: MessageRecord,
         pool: &SqlitePool,
 ) -> Result<(), ServerError> {
-    if let Message::Text(text) = message {
+    if let Message::Text(text) = &mut message_record.message {
         // Saving a row into DB.
         let timestamp = timestamp_to_string(SystemTime::now());
-        let result = insert_chat_message(pool, login, &timestamp, &text).await;
+        let result = insert_chat_message(
+            pool,
+            message_record.user_id,
+            &timestamp,
+            &text,
+        ).await;
         if let Err(err) = result {
             eprintln!("saving chat message entry failed: {}", err.to_string());
-        }
+        };
 
-        *message = Message::Text(format!("{}: {}", login, text));
+        message_record.message = Message::Text(format!("{}: {}", message_record.login, text));
     }
 
-    for (address, (stream, _login)) in clients.lock().await.iter_mut() {
-        if address == source_address {
+    for (address, client_record) in clients.lock().await.iter_mut() {
+        if address == &message_record.address {
             continue
         }
 
-        if let Err(err) = message.send(stream).await {
+        if let Err(err) = message_record.message.send(&mut client_record.stream).await {
             Err(ServerError::ForwardMessageError{
                 address: address.to_string(),
                 detail: err.to_string(),
