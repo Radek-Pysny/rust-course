@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use axum::{Router, routing::get};
 
 use crate::error::ServerError;

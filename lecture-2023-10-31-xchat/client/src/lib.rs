@@ -256,7 +256,7 @@ pub async fn _login(stream: &mut TcpStream, login: &str, pass: &str) -> Result<S
 
     let message = Message::Login {
         login: login.to_string(),
-        pass: pass.to_uppercase(),  // imagine that conversion to uppercase is password hashing
+        pass: format!("{:x}", md5::compute(pass)),
     };
 
     match message.send(stream).await {
