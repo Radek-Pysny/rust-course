@@ -1,20 +1,36 @@
 use std::io;
-use std::io::{Read, Write};
-use std::net::{TcpStream};
 
+use color_eyre::eyre::{bail, Result};
 use serde::{Serialize, Deserialize};
 use serde_cbor;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream};
+use tokio::time::{Duration, timeout};
 
 
+
+/// `Message` is a type representing all messages that might be transferred between server and
+/// client via TCP stream.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum Message {
-    /// Simple text message.
+    /// Login message (client -> server).
+    Login{
+        login: String,
+        pass: String,
+    },
+
+    /// Welcome message (server -> client).
+    Welcome{
+        motd: String,
+    },
+
+    /// Simple text message (server <-> client).
     Text(String),
 
-    /// Content of image file.
+    /// Content of image file (server <-> client).
     Image(Vec<u8>),
 
-    /// General file to be transferred.
+    /// General file to be transferred (server <-> client).
     File{
         filename: String,
         payload: Vec<u8>,
@@ -23,37 +39,88 @@ pub enum Message {
 
 
 impl Message {
+    /// `serialize` take care of serialization process into [CBOR](https://cbor.io/) binary format
+    /// using [serde](https://serde.rs/).
     pub fn serialize(&self) -> serde_cbor::Result<Vec<u8>> {
         serde_cbor::to_vec(&self)
     }
 
+    /// `deserialize` is counterpart to the [Message::serialize] function.
     pub fn deserialize(payload: &[u8]) -> serde_cbor::Result<Message> {
         serde_cbor::from_slice(&payload)
     }
 
-    pub fn send(&self, stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    /// `send` the message (_self_) via the given TCP `stream`.
+    pub async fn send(&self, stream: &mut TcpStream) -> Result<()> {
         let serialized = self.serialize()?;
         let length = serialized.len() as u32;
 
-        stream.write(&length.to_be_bytes())?;
-        stream.write_all(&serialized)?;
+        stream.write(&length.to_be_bytes()).await?;
+        stream.write_all(&serialized).await?;
 
         Ok(())
     }
 
-    pub fn receive(stream: &mut TcpStream) -> Result<Option<Message>, Box<dyn std::error::Error>> {
+    /// `receive` try to receive a message from the given TCP `stream` in a non-blocking manner.
+    ///
+    /// Receiving is based on accepting first 4-byte unsigned integer (in Big Endian coding)
+    /// that denotes number of bytes used by the follow-up [CBOR](https://cbor.io/) encoded message.
+    ///
+    /// Detection of [std::io::ErrorKind::WouldBlock] error kind is used to detect no message yet
+    /// to be received. In this case is returned `Ok(None)` to denote it clearly.
+    ///
+    /// If zero bytes are received, it means that the peer was disconnected, therefore it is being
+    /// translated into [std::io::ErrorKind::UnexpectedEof] error to have correctly handled
+    /// client disconnection on the server side.
+    ///
+    /// Message is implicitly deserialized from CBOR representation using [Message::deserialize].
+    pub async fn receive(stream: &mut TcpStream) -> Result<Option<Message>> {
         let mut length_bytes = [0u8; 4];
-        match stream.read_exact(&mut length_bytes) {
+        match stream.try_read(&mut length_bytes) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
             Ok(_) => {},
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(None);
-            },
-            Err(error) => return Err(Box::new(error)),
+            }
+            Err(err) => bail!(err),
         }
         let length = u32::from_be_bytes(length_bytes) as usize;
 
         let mut message_bytes = vec![0u8; length];
-        stream.read_exact(&mut message_bytes)?;
+        stream.read_exact(&mut message_bytes).await?;
+
+        let message = Message::deserialize(&message_bytes)?;
+        Ok(Some(message))
+    }
+
+    /// `receive_with_timeout` try to receive a response blocking for the given `duration`
+    /// from the given TCP `stream`.
+    ///
+    /// The timeout is realized using `tokio::time::timeout` function awaiting for receiving.
+    /// To detect that timeout happened check return value for `Ok(None)`.
+    ///
+    /// See [Message::receive] for details as they are very similar.
+    pub async fn receive_with_timeout(
+        stream: &mut TcpStream,
+        duration: Duration,
+    ) -> Result<Option<Message>> {
+        let mut length_bytes = [0u8; 4];
+
+        match timeout(duration, stream.read_exact(&mut length_bytes)).await? {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "received 0 bytes"))?,
+            Ok(_) => {},
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(None);
+            }
+            Err(err) => bail!(err),
+        };
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        let mut message_bytes = vec![0u8; length];
+        let result = timeout(Duration::from_secs(1), stream.read_exact(&mut message_bytes)).await?;
+        if let Err(err) = result {
+            bail!(err.to_string());
+        };
 
         let message = Message::deserialize(&message_bytes)?;
         Ok(Some(message))
