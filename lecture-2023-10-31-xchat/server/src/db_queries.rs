@@ -14,6 +14,12 @@ pub struct DbUser {
     password: String,
 }
 
+pub struct ChatMessage {
+    pub login: String,
+    pub timestamp: String,
+    pub text: String,
+}
+
 
 /// `fetch_user_by_login_and_password` receives a user from the `users` table.
 pub async fn fetch_user_by_login_and_password(
@@ -36,6 +42,29 @@ WHERE
     ).fetch_one(pool).await {
         Ok(user) => Ok(Some(user)),
         Err(sqlx::Error::RowNotFound) => Ok(None),
+        Err(err) => Err(ServerError::DBError(err.to_string())),
+    }
+}
+
+
+pub async fn fetch_chat_messages(
+    pool: &SqlitePool,
+) -> Result<Vec<ChatMessage>, ServerError> {
+    match query_as!(
+        ChatMessage,
+        r#"
+SELECT
+    u.login AS login,
+    cm.timestamp AS timestamp,
+    cm.text AS text
+FROM
+    chat_messages AS cm
+    JOIN users AS u ON u.id = cm.user_id
+ORDER BY timestamp DESC
+;"#,
+    ).fetch_all(pool).await {
+        Ok(chat_messages) => Ok(chat_messages),
+        Err(sqlx::Error::RowNotFound) => Ok(vec![]),
         Err(err) => Err(ServerError::DBError(err.to_string())),
     }
 }

@@ -13,6 +13,7 @@ use sqlx::sqlite::{SqlitePool};
 use tokio::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
+use tokio::time::{sleep, Duration};
 
 use db_queries::{insert_login, insert_chat_message, fetch_user_by_login_and_password};
 use shared::{Message, timestamp_to_string};
@@ -60,8 +61,9 @@ pub async fn start_server(
     // chat task
     let task_clients = clients.clone();
     let task_ok = finish_flag.clone();
+    let task_pool = pool.clone();
     join_set.spawn(async move {
-        chat(task_clients, task_ok, &pool).await
+        chat(task_clients, task_ok, &task_pool).await
     });
 
     // server task
@@ -73,8 +75,9 @@ pub async fn start_server(
     });
 
     // web task
+    let task_pool = pool.clone();
     join_set.spawn(async move {
-        web::start_web_server(web_port).await
+        web::start_web_server(web_port, task_pool).await
     });
 
     while let Some(result) = join_set.join_next().await {
@@ -242,6 +245,7 @@ async fn chat(
                 }
             }
         }
+        sleep(Duration::from_millis(10)).await;
     }
 }
 
