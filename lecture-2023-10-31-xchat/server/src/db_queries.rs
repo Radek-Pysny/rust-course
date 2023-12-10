@@ -14,7 +14,7 @@ pub struct DbUser {
     password: String,
 }
 
-pub struct ChatMessage {
+pub struct DbChatMessage {
     pub login: String,
     pub timestamp: String,
     pub text: String,
@@ -47,12 +47,16 @@ WHERE
 }
 
 
+/// `fetch_chat_messages` fetch chat messages with optional filtering.
 pub async fn fetch_chat_messages(
     pool: &SqlitePool,
-) -> Result<Vec<ChatMessage>, ServerError> {
-    match query_as!(
-        ChatMessage,
-        r#"
+    filter: &Option<String>,
+) -> Result<Vec<DbChatMessage>, ServerError> {
+    match filter {
+        None => {
+            match query_as!(
+                DbChatMessage,
+                r#"
 SELECT
     u.login AS login,
     cm.timestamp AS timestamp,
@@ -62,8 +66,50 @@ FROM
     JOIN users AS u ON u.id = cm.user_id
 ORDER BY timestamp DESC
 ;"#,
+            ).fetch_all(pool).await {
+                Ok(chat_messages) => Ok(chat_messages),
+                Err(sqlx::Error::RowNotFound) => Ok(vec![]),
+                Err(err) => Err(ServerError::DBError(err.to_string())),
+            }
+        },
+        Some(login) => {
+            match query_as!(
+                DbChatMessage,
+                r#"
+SELECT
+    u.login AS login,
+    cm.timestamp AS timestamp,
+    cm.text AS text
+FROM
+    chat_messages AS cm
+    JOIN users AS u ON u.id = cm.user_id
+WHERE u.login = ?1
+ORDER BY timestamp DESC
+;"#,
+                login,
+            ).fetch_all(pool).await {
+                Ok(chat_messages) => Ok(chat_messages),
+                Err(sqlx::Error::RowNotFound) => Ok(vec![]),
+                Err(err) => Err(ServerError::DBError(err.to_string())),
+            }
+        },
+    }
+}
+
+
+/// `fetch_users` fetch all users.
+pub async fn fetch_users(
+    pool: &SqlitePool,
+) -> Result<Vec<DbUser>, ServerError> {
+    match query_as!(
+        DbUser,
+        r#"
+SELECT *
+FROM users
+ORDER BY login ASC
+;"#,
     ).fetch_all(pool).await {
-        Ok(chat_messages) => Ok(chat_messages),
+        Ok(users) => Ok(users),
         Err(sqlx::Error::RowNotFound) => Ok(vec![]),
         Err(err) => Err(ServerError::DBError(err.to_string())),
     }
