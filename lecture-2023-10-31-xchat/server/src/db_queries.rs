@@ -172,3 +172,52 @@ VALUES
         Err(err) => Err(ServerError::DBError(err.to_string())),
     }
 }
+
+
+/// `delete_user_by_id` delete user and all his/her related chat messages and log-in records in
+/// a database transaction.
+pub async fn delete_user_by_id(pool: &SqlitePool, user_id: i64) -> Result<(), ServerError> {
+    let mut transaction = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => Err(ServerError::DBError(err.to_string()))?,
+    };
+
+    // Delete all chat messages of the given user in a transaction.
+    if let Err(err) = query!(
+        r#"
+DELETE FROM chat_messages
+WHERE user_id = ?1
+;"#,
+        user_id,
+    ).execute(&mut *transaction).await {
+        Err(ServerError::DBError(err.to_string()))?;
+    };
+
+    // Delete all log-in records of the given user in a transaction.
+    if let Err(err) = query!(
+        r#"
+DELETE FROM client_logins
+WHERE user_id = ?1
+;"#,
+        user_id,
+    ).execute(&mut *transaction).await {
+        Err(ServerError::DBError(err.to_string()))?;
+    };
+
+    // Delete the given user in a transaction.
+    if let Err(err) = query!(
+        r#"
+DELETE FROM users
+WHERE id = ?1
+;"#,
+        user_id,
+    ).execute(&mut *transaction).await {
+        Err(ServerError::DBError(err.to_string()))?;
+    };
+
+    // Commit transaction with deletion of the user.
+    if let Err(err) = transaction.commit().await {
+        Err(ServerError::DBError(err.to_string()))?;
+    };
+    Ok(())
+}
