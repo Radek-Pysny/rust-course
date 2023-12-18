@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::error::ServerError;
 use crate::db_queries::{fetch_chat_messages, fetch_users, delete_user_by_id};
+use crate::web_prometheus::{register_prometheus, prometheus_metrics_handler};
 use shared::concat;
 
 
@@ -21,16 +22,19 @@ pub async fn start_web_server(
     port_number: u16,
     pool: SqlitePool,
 ) -> Result<(), ServerError> {
-    let address = format!("localhost:{}", port_number);
+    let address = format!("0.0.0.0:{}", port_number);
 
     let state = Arc::new(AppState {
         db_pool: pool,
         host: address.clone(),
     });
 
+    register_prometheus()?;
+
     let router = Router::new()
         .route("/", get(user_list))
         .route("/delete_user", get(delete_user))
+        .route("/metrics", get(prometheus_metrics_handler))
         .layer(Extension(state));
 
     let listener = match tokio::net::TcpListener::bind(address).await {
