@@ -21,6 +21,8 @@ pub enum ServerError {
     WebServerError(String),
     #[error(transparent)]
     IOError(#[from] std::io::Error),
+    #[error("Prometheus registration error: {0}")]
+    PrometheusRegistrationError(String),
     #[error("join error: {0}")]
     JoinError(String),
 }

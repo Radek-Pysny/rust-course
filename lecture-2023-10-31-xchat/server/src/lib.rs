@@ -1,6 +1,7 @@
 mod db_queries;
 mod web;
 mod error;
+mod web_prometheus;
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -18,6 +19,12 @@ use tokio::time::{sleep, Duration};
 use db_queries::{insert_login, insert_chat_message, fetch_user_by_login_and_password};
 use shared::{Message, timestamp_to_string};
 use crate::error::ServerError;
+use crate::web_prometheus::{
+    CURRENT_CLIENT_COUNT_GAUGE,
+    NOT_AUTHORIZED_CONNECTION_COUNTER,
+    SUCCESSFUL_CONNECTION_COUNTER,
+    MESSAGE_COUNTER,
+};
 
 
 struct ClientRecord {
@@ -121,6 +128,7 @@ async fn listen_and_accept(
             user_id: None,
         };
         clients.lock().await.insert(address, client_record);
+        CURRENT_CLIENT_COUNT_GAUGE.inc();
     }
 
     Ok(())
@@ -141,7 +149,6 @@ async fn chat(
 )  -> Result<(), ServerError> {
     let mut message_queue: Vec<MessageRecord> = vec![];
     let mut close_queue: Vec<SocketAddr> = vec![];
-    let mut rename_queue: Vec<(SocketAddr, String)> = vec![];
 
     loop {
         // Detection of error from the other thread.
@@ -151,7 +158,6 @@ async fn chat(
 
         message_queue.clear();
         close_queue.clear();
-        rename_queue.clear();
 
         {
             let mut client_map = clients.lock().await;
@@ -172,8 +178,7 @@ async fn chat(
                                 let timestamp = timestamp_to_string(SystemTime::now());
                                 if let Err(err) = insert_login(pool, user.id, &timestamp).await {
                                     eprintln!("saving login entry failed: {}", err.to_string());
-                                }
-                                // rename_queue.push((address.clone(), login));
+                                };
 
                                 let response = Message::Welcome {
                                     motd: welcome_message,
@@ -181,9 +186,15 @@ async fn chat(
 
                                 if let Err(err) = response.send(&mut client_record.stream).await {
                                     eprintln!("failed to send welcome message: {}", err.to_string());
-                                }
+                                };
+
+                                SUCCESSFUL_CONNECTION_COUNTER.inc();
                             },
-                            Ok(None) => continue, // no response -> client is not authorized in timeout
+                            Ok(None) => {
+                                // no response -> client is not authorized in timeout
+                                NOT_AUTHORIZED_CONNECTION_COUNTER.inc();
+                                continue
+                            },
                             Err(err) => Err(err)?,
                         };
                     },
@@ -241,6 +252,7 @@ async fn chat(
                         client_record.login.as_ref().unwrap_or(&unknown_name),
                         address.to_string(),
                     );
+                    CURRENT_CLIENT_COUNT_GAUGE.dec();
                     clients.remove(address);
                 }
             }
@@ -270,6 +282,8 @@ async fn send_to_everyone_else(
         };
 
         message_record.message = Message::Text(format!("{}: {}", message_record.login, text));
+
+        MESSAGE_COUNTER.inc();
     }
 
     for (address, client_record) in clients.lock().await.iter_mut() {
